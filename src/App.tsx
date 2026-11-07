@@ -1,4 +1,6 @@
 import { useEffect, useRef, useState } from "react";
+import type { Provider, Session } from "@supabase/supabase-js";
+import { supabase, supabaseConfigured, supabaseRedirectUrl } from "./lib/supabase";
 
 type IconName =
   | "gem"
@@ -703,11 +705,11 @@ function syncRankingPeriods(
   return { winsByPeriod, winsPeriodResetAt, rewardCoins, rewardGems };
 }
 
-function readPlayerProfile(): PlayerProfile {
+function readPlayerProfile(accountId?: string): PlayerProfile {
   try {
-    const sigma = JSON.parse(localStorage.getItem("sigmaPlayerProfile") || "{}");
-    const gemini = JSON.parse(localStorage.getItem("botinProfileV2") || "{}");
-    const legacy = JSON.parse(localStorage.getItem("elBotinProfile") || "{}");
+    const sigma = JSON.parse(localStorage.getItem(accountId ? `sigmaPlayerProfile:${accountId}` : "sigmaPlayerProfile") || "{}");
+    const gemini = accountId ? {} : JSON.parse(localStorage.getItem("botinProfileV2") || "{}");
+    const legacy = accountId ? {} : JSON.parse(localStorage.getItem("elBotinProfile") || "{}");
     const saved = { ...gemini, ...legacy, ...sigma };
     const wins = emptyWins();
     for (const mode of ["classic", "teams", "duel"] as const) {
@@ -758,7 +760,7 @@ function readPlayerProfile(): PlayerProfile {
       lastSpinTime: Number.isFinite(saved.lastSpinTime) ? saved.lastSpinTime : null,
     };
     if (monthlySeasonExpired) {
-      savePlayerProfile(profile);
+      savePlayerProfile(profile, accountId);
       try { sessionStorage.setItem("sigmaSeasonRewardNotice", JSON.stringify({ coins: rankingWindows.rewardCoins, gems: rankingWindows.rewardGems })); } catch { /* storage may be unavailable */ }
     }
     return profile;
@@ -767,9 +769,10 @@ function readPlayerProfile(): PlayerProfile {
   }
 }
 
-function savePlayerProfile(profile: PlayerProfile) {
+function savePlayerProfile(profile: PlayerProfile, accountId?: string) {
   try {
-    localStorage.setItem("sigmaPlayerProfile", JSON.stringify(profile));
+    localStorage.setItem(accountId ? `sigmaPlayerProfile:${accountId}` : "sigmaPlayerProfile", JSON.stringify(profile));
+    if (accountId) return;
     const gemini = JSON.parse(localStorage.getItem("botinProfileV2") || "{}");
     localStorage.setItem("botinProfileV2", JSON.stringify({ ...gemini, ...profile }));
     const legacy = JSON.parse(localStorage.getItem("elBotinProfile") || "{}");
@@ -1212,6 +1215,12 @@ export default function App() {
   const wallet = { coins: profile.coins, gems: profile.gems };
   const [profileNameDraft, setProfileNameDraft] = useState(profile.name);
   const [profileMessage, setProfileMessage] = useState("");
+  const [authSession, setAuthSession] = useState<Session | null>(null);
+  const [authMode, setAuthMode] = useState<"login" | "register">("login");
+  const [authEmail, setAuthEmail] = useState("");
+  const [authPassword, setAuthPassword] = useState("");
+  const [authBusy, setAuthBusy] = useState(false);
+  const [authMessage, setAuthMessage] = useState("");
   const [rankingMode, setRankingMode] = useState<GameMode>("classic");
   const [rankingPeriod, setRankingPeriod] = useState<RankingPeriod>("total");
   const [missionTab, setMissionTab] = useState<PlayerMission["period"]>("diaria");
@@ -1253,6 +1262,51 @@ export default function App() {
     const interval = window.setInterval(() => setServiceNow(Date.now()), 1000);
     return () => window.clearInterval(interval);
   }, []);
+
+  useEffect(() => {
+    if (!supabase) return;
+    let mounted = true;
+    void supabase.auth.getSession().then(({ data, error }) => {
+      if (!mounted) return;
+      if (error) setAuthMessage("No se pudo recuperar la sesión. Vuelve a iniciar sesión.");
+      setAuthSession(data.session);
+    });
+    const { data: { subscription } } = supabase.auth.onAuthStateChange((_event, session) => {
+      if (mounted) setAuthSession(session);
+    });
+    return () => {
+      mounted = false;
+      subscription.unsubscribe();
+    };
+  }, []);
+
+  useEffect(() => {
+    if (!supabase || !authSession) return;
+    let active = true;
+    const userId = authSession.user.id;
+    void supabase.from("profiles").select("display_name, avatar_id").eq("id", userId).maybeSingle().then(({ data, error }) => {
+      if (!active) return;
+      if (error) { setAuthMessage("La sesión está activa, pero no se pudo cargar el perfil de Supabase."); return; }
+      if (!data) { setAuthMessage("Cuenta conectada. El perfil se creará al completar el primer registro."); return; }
+      const current = readPlayerProfile(userId);
+      const avatar = profileAvatarOptionsAll.includes(data.avatar_id) ? data.avatar_id : current.avatar;
+      const next = { ...current, name: data.display_name || current.name, avatar };
+      profileRef.current = next;
+      setProfile(next);
+      setProfileNameDraft(next.name);
+      savePlayerProfile(next, userId);
+      setAuthMessage("");
+    });
+    return () => { active = false; };
+  }, [authSession?.user.id]);
+
+  useEffect(() => {
+    if (authSession) return;
+    const offlineProfile = readPlayerProfile();
+    profileRef.current = offlineProfile;
+    setProfile(offlineProfile);
+    setProfileNameDraft(offlineProfile.name);
+  }, [authSession?.user.id]);
 
   useEffect(() => {
     const music = new Audio(publicAsset("sigma/audio/Raise_or_Fold_loop.ogg"));
@@ -1356,9 +1410,72 @@ export default function App() {
   };
 
   const commitProfile = (next: PlayerProfile) => {
+    const previous = profileRef.current;
     profileRef.current = next;
     setProfile(next);
-    savePlayerProfile(next);
+    savePlayerProfile(next, authSession?.user.id);
+    if (supabase && authSession && (next.name !== previous.name || next.avatar !== previous.avatar)) {
+      void supabase.from("profiles").update({ display_name: next.name, avatar_id: next.avatar }).eq("id", authSession.user.id).then(({ error }) => {
+        if (error) setAuthMessage("Cambios guardados localmente, pero no se sincronizó el perfil remoto.");
+      });
+    }
+  };
+
+  const submitEmailAuth = async () => {
+    if (!supabase || authBusy) return;
+    const email = authEmail.trim().toLowerCase();
+    if (!email || authPassword.length < 8) { setAuthMessage("Introduce un correo válido y una contraseña de al menos 8 caracteres."); return; }
+    setAuthBusy(true);
+    setAuthMessage("");
+    try {
+      if (authMode === "register") {
+        const { data, error } = await supabase.auth.signUp({
+          email,
+          password: authPassword,
+          options: {
+            emailRedirectTo: supabaseRedirectUrl(),
+            data: { display_name: profileRef.current.name, avatar_id: profileRef.current.avatar },
+          },
+        });
+        if (error) throw error;
+        setAuthMessage(data.session ? "Cuenta creada y sesión iniciada." : "Cuenta creada. Revisa tu correo para confirmar la dirección antes de iniciar sesión.");
+      } else {
+        const { error } = await supabase.auth.signInWithPassword({ email, password: authPassword });
+        if (error) throw error;
+        setAuthMessage("Sesión iniciada.");
+      }
+    } catch (error) {
+      setAuthMessage(error instanceof Error ? error.message : "No se pudo completar la operación.");
+    } finally {
+      setAuthBusy(false);
+    }
+  };
+
+  const signInWithProvider = async (provider: Provider) => {
+    if (!supabase || authBusy) return;
+    setAuthBusy(true);
+    setAuthMessage("");
+    try {
+      const { error } = await supabase.auth.signInWithOAuth({ provider, options: { redirectTo: supabaseRedirectUrl() } });
+      if (error) setAuthMessage(error.message);
+    } catch (error) {
+      setAuthMessage(error instanceof Error ? error.message : "No se pudo iniciar el acceso social.");
+    } finally {
+      setAuthBusy(false);
+    }
+  };
+
+  const signOutAccount = async () => {
+    if (!supabase || authBusy) return;
+    setAuthBusy(true);
+    try {
+      const { error } = await supabase.auth.signOut();
+      setAuthMessage(error ? error.message : "Sesión cerrada. Tu partida local sigue guardada en este navegador.");
+    } catch (error) {
+      setAuthMessage(error instanceof Error ? error.message : "No se pudo cerrar la sesión.");
+    } finally {
+      setAuthBusy(false);
+    }
   };
 
   const openChest = (chestId: string, instant = false) => {
@@ -2021,6 +2138,24 @@ export default function App() {
             {screen === "profile" && <>
               <span className="menu-section-kicker">TU HISTORIA EN LA MESA</span><h1>MI PERFIL</h1>
               <div className="profile-hero"><div className={`menu-avatar-frame large ${avatarFrameClass(profile.equippedFrame)}`} style={{ "--avatar-fill": profile.equippedAvatarColor } as React.CSSProperties}><AvatarFace avatar={profile.avatar} /></div><div><small>CAPITÁN</small><strong>{profile.name}</strong><span>Perfil y victorias</span></div></div>
+              <section className="account-panel" aria-labelledby="account-panel-title">
+                <div className="account-panel-heading"><span><small>CUENTA ONLINE</small><strong id="account-panel-title">{authSession ? "Cuenta vinculada" : "Guarda tu perfil"}</strong></span>{authSession && <button type="button" onClick={() => void signOutAccount()} disabled={authBusy}>CERRAR SESIÓN</button>}</div>
+                {!supabaseConfigured ? <p className="account-status">La conexión con Supabase aún no está configurada en este entorno. Añade la URL del proyecto y la clave pública para activar el registro.</p> : authSession ? <>
+                  <p className="account-status">Conectado como <strong>{authSession.user.email ?? "cuenta social"}</strong>. El perfil público se sincroniza con esta cuenta.</p>
+                  {authMessage && <p className="account-feedback">{authMessage}</p>}
+                </> : <>
+                  <div className="account-auth-tabs"><button type="button" className={authMode === "login" ? "active" : ""} onClick={() => { setAuthMode("login"); setAuthMessage(""); }}>INICIAR SESIÓN</button><button type="button" className={authMode === "register" ? "active" : ""} onClick={() => { setAuthMode("register"); setAuthMessage(""); }}>CREAR CUENTA</button></div>
+                  <form className="account-auth-form" onSubmit={(event) => { event.preventDefault(); void submitEmailAuth(); }}>
+                    <label htmlFor="account-email">CORREO ELECTRÓNICO</label><input id="account-email" type="email" autoComplete="email" required maxLength={254} value={authEmail} onChange={(event) => setAuthEmail(event.target.value)} placeholder="tu@correo.com" />
+                    <label htmlFor="account-password">CONTRASEÑA</label><input id="account-password" type="password" autoComplete={authMode === "register" ? "new-password" : "current-password"} required minLength={8} value={authPassword} onChange={(event) => setAuthPassword(event.target.value)} placeholder="Mínimo 8 caracteres" />
+                    <button className="account-submit" type="submit" disabled={authBusy}>{authBusy ? "CONECTANDO…" : authMode === "register" ? "CREAR CUENTA CON CORREO" : "ENTRAR CON CORREO"}</button>
+                  </form>
+                  <div className="account-provider-divider"><span>o continúa con</span></div>
+                  <div className="account-provider-buttons"><button type="button" onClick={() => void signInWithProvider("google")} disabled={authBusy}><b>G</b> Google</button><button type="button" onClick={() => void signInWithProvider("facebook")} disabled={authBusy}><b>f</b> Facebook</button></div>
+                  {authMessage && <p className="account-feedback" role="status">{authMessage}</p>}
+                  <small className="account-privacy-note">Tu contraseña la gestiona Supabase Auth; nunca se guarda en el juego.</small>
+                </>}
+              </section>
               <div className="profile-season-ranks"><span className="menu-section-kicker">TUS RANGOS · TEMPORADA ACTUAL</span>{(["classic", "teams", "duel"] as GameMode[]).map((mode) => { const wins = profile.winsByPeriod.monthly[mode].player ?? 0; const rank = rankForWins(wins); return <div className="profile-season-rank" key={mode}><img src={rankBadgeUrl(rank.asset)} alt="" /><span><small>{modeTitles[mode]}</small><strong>{rank.name}</strong><em>{wins} victorias este mes</em><em>{rank.next === Infinity ? "Rango máximo" : `Faltan ${Math.max(0, rank.next - wins)} para ${rank.nextName}`}</em><em>+{rank.coins} 🪙 · +{rank.gems} 💎 al cierre</em></span></div>; })}</div>
               <div className="profile-name-edit"><label htmlFor="captain-name">NOMBRE DEL CAPITÁN</label><div><input id="captain-name" maxLength={12} value={profileNameDraft} onChange={(event) => setProfileNameDraft(event.target.value)} /><button disabled={!canChangeName} onClick={() => {
                 const nextName = profileNameDraft.trim();

@@ -2916,3 +2916,35 @@
 .inventory-sidebar { gap:0; }
 .inventory-sidebar .selected-preview { flex:1 1 auto;min-height:0; }
 .store-item-lock { background:transparent; }
+
+.account-panel { margin:0 0 14px;padding:12px;border:1px solid #705747;border-radius:13px;background:linear-gradient(145deg,#302431,#211a27);text-align:left;box-shadow:0 6px 16px #0003; }
+.account-panel-heading { display:flex;align-items:center;justify-content:space-between;gap:10px;margin-bottom:8px; }
+.account-panel-heading > span { display:flex;flex-direction:column;gap:2px; }
+.account-panel-heading small { color:#e9b64e;font-size:7px;font-weight:900;letter-spacing:.14em; }
+.account-panel-heading strong { color:#fff0bf;font:900 15px "Baloo 2",sans-serif; }
+.account-panel-heading > button { padding:7px 9px;border:1px solid #77555e;border-radius:8px;background:#392632;color:#ffd9b5;font-size:7px;font-weight:900; }
+.account-panel-heading > button:disabled,.account-panel button:disabled { opacity:.55;cursor:wait; }
+.account-status,.account-feedback { margin:6px 0 0;color:#c7b9c5;font-size:9px;line-height:1.5;overflow-wrap:anywhere; }
+.account-status strong { color:#fff0bf; }
+.account-feedback { color:#a7eb9c; }
+.account-auth-tabs { display:grid;grid-template-columns:1fr 1fr;gap:5px;margin:8px 0; }
+.account-auth-tabs button { padding:7px 5px;border:1px solid #66505f;border-radius:8px;background:#281f2c;color:#d0c0ce;font-size:7px;font-weight:900;letter-spacing:.06em; }
+.account-auth-tabs button.active { border-color:#f2c35d;background:linear-gradient(#ffdf80,#e9ad45);color:#332018; }
+.account-auth-form { display:grid;gap:6px; }
+.account-auth-form label { margin-top:2px;color:#e8c77f;font-size:7px;font-weight:900;letter-spacing:.1em; }
+.account-auth-form input { width:100%;min-width:0;padding:9px 10px;border:1px solid #604d60;border-radius:8px;background:#18141e;color:#fff4dc;font-size:10px; }
+.account-auth-form input:focus { outline:2px solid #e8b84d;outline-offset:1px; }
+.account-auth-form input::placeholder { color:#8f828f; }
+.account-auth-form .account-submit { margin-top:4px;padding:9px;border:1px solid #ffe08a;border-radius:8px;background:linear-gradient(#ffe48e,#eaa941);color:#382217;font-size:8px;font-weight:900; }
+.account-provider-divider { display:flex;align-items:center;gap:8px;margin:10px 0;color:#a99aa8;font-size:8px; }
+.account-provider-divider::before,.account-provider-divider::after { content:"";height:1px;flex:1;background:#554250; }
+.account-provider-buttons { display:grid;grid-template-columns:1fr 1fr;gap:7px; }
+.account-provider-buttons button { display:flex;align-items:center;justify-content:center;gap:7px;padding:8px 6px;border:1px solid #655466;border-radius:8px;background:#211b27;color:#f6e8d2;font-size:9px;font-weight:800; }
+.account-provider-buttons b { display:grid;width:17px;height:17px;place-items:center;border-radius:50%;background:#fff;color:#4285f4;font:900 12px Arial,sans-serif; }
+.account-provider-buttons button:nth-child(2) b { background:#1877f2;color:white; }
+.account-privacy-note { display:block;margin-top:8px;color:#a99ba7;font-size:7px;line-height:1.4; }
+@media(max-width:620px) {
+  .account-panel { padding:10px; }
+  .account-panel-heading strong { font-size:13px; }
+  .account-auth-form input { font-size:16px; }
+}

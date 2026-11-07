@@ -29,6 +29,10 @@ jobs:
         run: npm ci
       - name: Build site
         run: npm run build
+        env:
+          # Publishable browser config; database access is protected by RLS policies.
+          VITE_SUPABASE_URL: https://urluvygzebllnbyfmeai.supabase.co
+          VITE_SUPABASE_PUBLISHABLE_KEY: sb_publishable_odyhBSnlY2gYPw6yQfxd_A_AAhTm7XF
       - name: Upload Pages artifact
         uses: actions/upload-pages-artifact@v3
         with:
