@@ -329,17 +329,18 @@ const hasDeckCard = (ownedCards: string[], deckId: string) => ownedCards.some((c
 const hasCompleteDeck = (ownedCards: string[], deckId: string) => Array.from({ length: 9 }, (_, index) => ownedCards.includes(`${deckId}-${index + 1}`)).every(Boolean);
 const hasActiveSet = (profile: PlayerProfile, deckId: string) => profile.equippedCards.includes(deckId) && hasCompleteDeck(profile.ownedCards, deckId);
 
+const publicAsset = (path: string) => `${import.meta.env.BASE_URL}${path.replace(/^\/+/, "")}`;
 const soundFiles = {
-  click: "/sigma/audio/oneshots/click_001.ogg",
-  cardSelect: "/sigma/audio/oneshots/card_select_01.ogg",
-  cardHover: "/sigma/audio/oneshots/card_hover_01.ogg",
-  confirm: "/sigma/audio/oneshots/card_place_01.ogg",
-  flip: "/sigma/audio/oneshots/card_flip_01.ogg",
-  cardSlide: "/sigma/audio/oneshots/card_slide_01.ogg",
-  handWin: "/sigma/audio/oneshots/hand_win_01.ogg",
-  handLose: "/sigma/audio/oneshots/hand_lose_01.ogg",
-  deal: "/sigma/audio/oneshots/card_deal_01.ogg",
-  score: "/sigma/audio/oneshots/score_tick_01.ogg",
+  click: publicAsset("sigma/audio/oneshots/click_001.ogg"),
+  cardSelect: publicAsset("sigma/audio/oneshots/card_select_01.ogg"),
+  cardHover: publicAsset("sigma/audio/oneshots/card_hover_01.ogg"),
+  confirm: publicAsset("sigma/audio/oneshots/card_place_01.ogg"),
+  flip: publicAsset("sigma/audio/oneshots/card_flip_01.ogg"),
+  cardSlide: publicAsset("sigma/audio/oneshots/card_slide_01.ogg"),
+  handWin: publicAsset("sigma/audio/oneshots/hand_win_01.ogg"),
+  handLose: publicAsset("sigma/audio/oneshots/hand_lose_01.ogg"),
+  deal: publicAsset("sigma/audio/oneshots/card_deal_01.ogg"),
+  score: publicAsset("sigma/audio/oneshots/score_tick_01.ogg"),
 };
 
 type AppScreen = "menu" | "modes" | "game" | "settings" | "ranking" | "season-ranking" | "profile" | "missions" | "roulette";
@@ -996,7 +997,7 @@ function PrizeCard({
       <div className="prize-corner">★</div>
       <div className="prize-art">
         {secret ? (
-          <img className="secret-card-back" src="/sigma/ui/card_back.png" alt="Reverso de la carta secreta" />
+          <img className="secret-card-back" src={publicAsset("sigma/ui/card_back.png")} alt="Reverso de la carta secreta" />
         ) : effect ? (
           <div className="revealed-effect-art" style={{ "--effect-a": effect.colors[0], "--effect-b": effect.colors[1] } as React.CSSProperties}>
             <span>{effect.icon}</span>
@@ -1254,7 +1255,7 @@ export default function App() {
   }, []);
 
   useEffect(() => {
-    const music = new Audio("/sigma/audio/Raise_or_Fold_loop.ogg");
+    const music = new Audio(publicAsset("sigma/audio/Raise_or_Fold_loop.ogg"));
     music.loop = true;
     music.preload = "auto";
     audioRef.current.music = music;
@@ -1944,12 +1945,12 @@ export default function App() {
         <section className="menu-player-card">
           <div className={`menu-avatar-frame ${avatarFrameClass(profile.equippedFrame)}`} style={{ "--avatar-fill": profile.equippedAvatarColor } as React.CSSProperties}><AvatarFace avatar={profile.avatar} /></div>
           <div className="menu-profile-copy"><span>CAPITÁN</span><strong>{profile.name}</strong>
-            <div className="menu-wallet"><span><img src="/sigma/ui/coin.png" alt="" /> {wallet.coins}</span><span><img src="/sigma/ui/diamond.png" alt="" /> {wallet.gems}</span></div>
+            <div className="menu-wallet"><span><img src={publicAsset("sigma/ui/coin.png")} alt="" /> {wallet.coins}</span><span><img src={publicAsset("sigma/ui/diamond.png")} alt="" /> {wallet.gems}</span></div>
           </div>
           <button className="profile-open" onClick={() => goTo("profile")} aria-label="Abrir mi perfil">↗</button>
         </section>
         <div className="menu-season-pill"><span className="season-pill-label"><i className="season-dot" />TEMPORADA MENSUAL</span><b>{new Date(serviceNow).toLocaleDateString("es-ES", { month: "long", year: "numeric" }).toUpperCase()}</b><small>CIERRA EN {formatPeriodRemaining(profile.winsPeriodResetAt.monthly - serviceNow)}</small></div>
-        <div className="menu-board-art" aria-hidden="true"><div className="menu-board-card card-one"><GeminiCardFace deckId="cuchillo" value={3} /></div><div className="menu-board-card card-two"><GeminiCardFace deckId="escudo" value={7} /></div><div className="menu-board-card card-three"><GeminiCardFace deckId="dorado" value={5} /></div><img className="menu-board-coin" src="/sigma/ui/diamond.png" alt="" /></div>
+        <div className="menu-board-art" aria-hidden="true"><div className="menu-board-card card-one"><GeminiCardFace deckId="cuchillo" value={3} /></div><div className="menu-board-card card-two"><GeminiCardFace deckId="escudo" value={7} /></div><div className="menu-board-card card-three"><GeminiCardFace deckId="dorado" value={5} /></div><img className="menu-board-coin" src={publicAsset("sigma/ui/diamond.png")} alt="" /></div>
 
         {screen === "menu" ? <>
           <section className="main-menu-content">
@@ -1961,11 +1962,11 @@ export default function App() {
             </button>
             <div className="menu-shortcuts main-menu-shortcuts">
               <button onClick={() => goTo("season-ranking")}><img className="menu-option-icon rank-shortcut-icon" src={rankBadgeUrl("badge_gold_01.png")} alt="" /><span>RANKING DE RANGOS</span></button>
-              <button onClick={() => goTo("ranking")}><img className="menu-option-icon" src="/sigma/ui/trophy.png" alt="" /><span>RANKING VICTORIAS</span></button>
+              <button onClick={() => goTo("ranking")}><img className="menu-option-icon" src={publicAsset("sigma/ui/trophy.png")} alt="" /><span>RANKING VICTORIAS</span></button>
               <button onClick={() => goTo("missions")}><span className="menu-option-emoji">🏆</span><span>MISIONES Y RECOMPENSAS</span></button>
               <button onClick={() => { playSfx("click"); setPage("shop"); }}><span className="menu-option-emoji">🃏</span><span>TIENDA / INVENTARIO</span></button>
               <button onClick={() => goTo("profile")}><AvatarFace avatar={profile.avatar} className="menu-option-emoji" /><span>MI PERFIL</span></button>
-              <button onClick={() => goTo("settings")}><img className="menu-option-icon" src="/sigma/ui/settings.png" alt="" /><span>AJUSTES</span></button>
+              <button onClick={() => goTo("settings")}><img className="menu-option-icon" src={publicAsset("sigma/ui/settings.png")} alt="" /><span>AJUSTES</span></button>
             </div>
             <button className="roulette-banner" onClick={() => goTo("roulette")}><span>🎡</span><div><strong>RULETA DIARIA</strong><small>{rouletteReady ? "¡Tienes un giro gratis!" : `Siguiente giro gratis en ${rouletteTimeLabel}`}</small></div><b>GIRAR ›</b></button>
           </section>
