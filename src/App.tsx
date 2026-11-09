@@ -1242,6 +1242,7 @@ export default function App() {
   const [profileNameDraft, setProfileNameDraft] = useState(profile.name);
   const [profileMessage, setProfileMessage] = useState("");
   const [authSession, setAuthSession] = useState<Session | null>(null);
+  const authUserIdRef = useRef<string | null>(null);
   const [localPreview, setLocalPreview] = useState(false);
   const [authBootComplete, setAuthBootComplete] = useState(false);
   const [authMode, setAuthMode] = useState<"login" | "register">("login");
@@ -1528,14 +1529,26 @@ export default function App() {
     if (!supabase) { setAuthBootComplete(true); return; }
     let mounted = true;
     const applySession = (session: Session | null) => {
+      const nextUserId = session?.user.id ?? null;
+      const userChanged = authUserIdRef.current !== nextUserId;
+      authUserIdRef.current = nextUserId;
       if (session) {
-        setUsernameChecked(false);
-        setUsernameRequired(false);
-        setUsernameMessage("");
+        // Auth emits INITIAL_SESSION and TOKEN_REFRESHED for the same account.
+        // Keep the resolved username state across those events; otherwise the
+        // app shows onboarding again without reloading the profile.
+        if (userChanged) {
+          setUsernameChecked(false);
+          setUsernameRequired(false);
+          setUsernameMessage("");
+        }
         const accountProfile = readPlayerProfile(session.user.id);
         profileRef.current = accountProfile;
         setProfile(accountProfile);
         setProfileNameDraft(accountProfile.name);
+      } else if (userChanged) {
+        setUsernameChecked(false);
+        setUsernameRequired(false);
+        setUsernameMessage("");
       }
       setAuthSession(session);
       setAuthBootComplete(true);
