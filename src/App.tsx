@@ -1612,13 +1612,15 @@ export default function App() {
       accountWalletRefreshRef.current = async () => {};
       return;
     }
+    const client = supabase;
+    const userId = authSession.user.id;
     let active = true;
     let requestPending = false;
     const refresh = async () => {
       if (!active || requestPending) return;
       requestPending = true;
       setAccountWalletLoading(true);
-      const { data, error } = await supabase.from("player_wallets").select("coins,gems").eq("user_id", authSession.user.id).maybeSingle();
+      const { data, error } = await client.from("player_wallets").select("coins,gems").eq("user_id", userId).maybeSingle();
       if (active) {
         if (error) {
           setAccountWalletMessage("No se pudo leer el monedero seguro de la cuenta.");
