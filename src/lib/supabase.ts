@@ -15,4 +15,8 @@ export const supabase = supabaseConfigured
     })
   : null;
 
-export const supabaseRedirectUrl = () => `${window.location.origin}${window.location.pathname}`;
+export const supabaseRedirectUrl = () => {
+  const redirect = new URL(window.location.pathname, window.location.origin);
+  if (redirect.hostname === "www.nebuladigitalstudio.es") redirect.hostname = "nebuladigitalstudio.es";
+  return redirect.toString();
+};
