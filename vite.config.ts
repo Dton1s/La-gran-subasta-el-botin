@@ -12,11 +12,15 @@ export default defineConfig(({ mode }) => {
   const emitSourcemaps = mode === "development";
 
   return {
-    base: process.env.FIGMA_PUBLIC_URL
-      ? `${process.env.FIGMA_PUBLIC_URL}/`
-      : process.env.GITHUB_ACTIONS === "true"
-        ? "/La-gran-subasta-el-botin/"
-        : "/",
+    base: process.env.VITE_BASE_PATH
+      ? process.env.VITE_BASE_PATH.endsWith("/")
+        ? process.env.VITE_BASE_PATH
+        : `${process.env.VITE_BASE_PATH}/`
+      : process.env.FIGMA_PUBLIC_URL
+        ? `${process.env.FIGMA_PUBLIC_URL}/`
+        : process.env.GITHUB_ACTIONS === "true"
+          ? "/La-gran-subasta-el-botin/"
+          : "/",
     build: {
       sourcemap: emitSourcemaps ? "inline" : false,
       minify: !emitSourcemaps,
@@ -93,7 +97,10 @@ function figmaSiteConfiguration(config: FigmaSiteConfiguration): Plugin {
   const description = config.description ?? "";
   // Imported HTML keeps its own favicon. New Makes use PNG because Google Search does not
   // support SVG favicons, even though browsers do.
-  const favicon = config.icons?.icon ?? "/favicon.png";
+  const basePath = process.env.VITE_BASE_PATH
+    ? `${process.env.VITE_BASE_PATH.replace(/\/+$/, "")}/`
+    : "";
+  const favicon = basePath ? `${basePath}favicon.png` : config.icons?.icon ?? "/favicon.png";
   const socialImage = config.openGraph?.image ?? "";
   const language = sanitizeHtmlValue(config.language) || "en";
   const googleAnalyticsId = sanitizeHtmlValue(config.analytics?.googleAnalyticsId);
