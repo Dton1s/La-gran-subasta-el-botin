@@ -622,7 +622,7 @@ function AvatarFace({ avatar, className = "" }: { avatar: string; className?: st
   const item = avatarStoreItems.find((entry) => entry.id === normalizedAvatar && "image" in entry) as (typeof avatarStoreItems)[number] & { image?: string } | undefined;
   const fallback = profileAvatarOptions.includes(normalizedAvatar) ? normalizedAvatar : "👤";
   const artKind = normalizedAvatar.startsWith("avatar-fondo-") ? "avatar-art-with-background" : "avatar-art-transparent";
-  return item?.image ? <><img className={`avatar-art ${artKind} ${className}`} src={item.image} alt="" onError={(event) => { event.currentTarget.style.display = "none"; const sibling = event.currentTarget.nextElementSibling as HTMLElement | null; if (sibling) sibling.style.display = "grid"; }} /><span className={`profile-avatar-emoji avatar-art-fallback ${className}`} style={{ display: "none" }}>{fallback}</span></> : <span className={`profile-avatar-emoji avatar-basic-emoji ${className}`}>{fallback}</span>;
+  return item?.image ? <><img className={`avatar-art ${artKind} ${className}`} src={item.image} alt="" onError={(event) => { event.currentTarget.style.display = "none"; const sibling = event.currentTarget.nextElementSibling as HTMLElement | null; sibling?.classList.add("is-visible"); }} /><span className={`profile-avatar-emoji avatar-art-fallback ${className}`} aria-hidden="true">{fallback}</span></> : <span className={`profile-avatar-emoji avatar-basic-emoji ${className}`}>{fallback}</span>;
 }
 function ChatEmoteImage({ emote, className = "" }: { emote: ChatEmote; className?: string }) {
   return <img className={className} src={emote.image} alt={emote.label} loading="lazy" />;

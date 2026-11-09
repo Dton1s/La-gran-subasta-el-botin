@@ -3923,3 +3923,176 @@ canvas { display:block;width:100%;height:100%;object-fit:contain; }
   .bid-player-avatar.user-bid-avatar .avatar-basic-emoji { font-size:12px!important; }
   .social-player-avatar .avatar-basic-emoji,.ranking-avatar .avatar-basic-emoji { font-size:14px; }
 }
+
+/* Avatar rendering: keep the portrait artwork visible and size every fallback to its own frame. */
+.menu-avatar-frame,
+.cosmetic-avatar-preview,
+.cosmetic-frame-preview,
+.avatar-color-preview,
+.ranking-avatar,
+.game-player-avatar,
+.social-player-avatar,
+.bid-player-avatar.user-bid-avatar,
+.round-result-avatar {
+  position: relative;
+  isolation: isolate;
+  container-type: size;
+}
+.menu-avatar-frame::before,
+.cosmetic-avatar-preview::before,
+.cosmetic-frame-preview::before {
+  inset: clamp(4px, 15cqw, 8px);
+  border-radius: clamp(5px, 18cqw, 9px);
+}
+.menu-avatar-frame > .avatar-art,
+.cosmetic-avatar-preview > .avatar-art,
+.cosmetic-frame-preview > .avatar-art,
+.avatar-color-preview > .avatar-art {
+  position: absolute !important;
+  inset: clamp(4px, 15cqw, 8px) !important;
+  display: block;
+  width: auto !important;
+  height: auto !important;
+  min-width: 0;
+  min-height: 0;
+  max-width: none;
+  max-height: none;
+  box-sizing: border-box;
+  padding: 0 !important;
+  object-fit: contain;
+  object-position: center;
+  transform: none !important;
+  image-rendering: auto;
+}
+.menu-avatar-frame > .avatar-art-with-background,
+.cosmetic-avatar-preview > .avatar-art-with-background,
+.cosmetic-frame-preview > .avatar-art-with-background,
+.avatar-color-preview > .avatar-art-with-background {
+  object-fit: cover;
+}
+.menu-avatar-frame .avatar-basic-emoji,
+.cosmetic-avatar-preview .avatar-basic-emoji,
+.cosmetic-frame-preview .avatar-basic-emoji,
+.avatar-color-preview .avatar-basic-emoji,
+.game-player-avatar .avatar-basic-emoji,
+.ranking-avatar .avatar-basic-emoji,
+.social-player-avatar .avatar-basic-emoji,
+.bid-player-avatar.user-bid-avatar .avatar-basic-emoji,
+.round-result-avatar .avatar-basic-emoji,
+.menu-avatar-frame .avatar-art-fallback.is-visible,
+.cosmetic-avatar-preview .avatar-art-fallback.is-visible,
+.cosmetic-frame-preview .avatar-art-fallback.is-visible {
+  position: absolute !important;
+  inset: clamp(2px, 12cqw, 7px) !important;
+  display: grid !important;
+  width: auto !important;
+  height: auto !important;
+  min-width: 0;
+  min-height: 0;
+  padding: 0 !important;
+  place-items: center !important;
+  font-size: clamp(11px, 62cqw, 37px) !important;
+  line-height: 1 !important;
+  text-align: center;
+  transform: none !important;
+}
+/* Previous responsive overrides forced image-error fallbacks on top of valid PNGs. */
+.avatar-art-fallback:not(.is-visible) {
+  display: none !important;
+  visibility: hidden !important;
+}
+.avatar-art-fallback.is-visible {
+  position: absolute !important;
+  inset: 0 !important;
+  display: grid !important;
+  width: 100% !important;
+  height: 100% !important;
+  place-items: center !important;
+  visibility: visible !important;
+  font-size: clamp(11px, 60cqw, 26px) !important;
+  line-height: 1 !important;
+}
+.game-player-avatar > .avatar-art,
+.bid-player-avatar.user-bid-avatar > .avatar-art,
+.round-result-avatar > .avatar-art,
+.ranking-avatar > .avatar-art,
+.social-player-avatar > .avatar-art {
+  display: block;
+  width: 100%;
+  height: 100%;
+  min-width: 0;
+  min-height: 0;
+  padding: 1px;
+  object-fit: contain;
+  object-position: center;
+}
+.game-player-avatar > .avatar-art-with-background,
+.bid-player-avatar.user-bid-avatar > .avatar-art-with-background,
+.round-result-avatar > .avatar-art-with-background,
+.ranking-avatar > .avatar-art-with-background,
+.social-player-avatar > .avatar-art-with-background { object-fit: cover; }
+
+/* Keep collection controls and card grids stable across landscape viewport sizes. */
+@media (orientation: landscape) and (min-width: 701px) and (max-width: 1024px) and (min-height: 521px) {
+  .inventory-page { inset: 0; border-radius: 0; }
+  .inventory-header { min-height: 76px;flex-basis: 76px;gap: 8px;padding: 7px 12px; }
+  .inventory-title h1 { font-size: clamp(18px, 3.8dvh, 26px); }
+  .inventory-title p { display: none; }
+  .shop-categories { min-height: 40px;flex-wrap: nowrap;justify-content: center;gap: 5px;padding: 3px 6px;overflow-x: auto; }
+  .shop-categories button { min-height: 30px;flex: 0 0 auto;padding: 5px clamp(7px, 1.2vw, 13px);font-size: 7px; }
+  .inventory-body { min-height: 0;grid-template-columns: minmax(112px, 18vw) minmax(0,1fr);gap: 7px;padding: 7px 9px; }
+  .inventory-sidebar { min-width: 0;min-height: 0;overflow-y: auto; }
+  .inventory-sidebar .selected-preview { min-height: 0;overflow: visible; }
+  .inventory-catalog { min-width: 0;min-height: 0;overflow: hidden; }
+  .inventory-catalog.deck-catalog { overflow: hidden; }
+  .catalog-scroll-area { min-width: 0;min-height: 0;overflow: auto; }
+  .collection-filters { grid-template-columns: repeat(3,minmax(0,1fr));gap: 4px;padding: 2px 0 6px; }
+  .collection-filters button { min-height: 36px;padding: 4px 5px;font-size: 7px; }
+  .collection-filters button small { display: none; }
+  .card-grid { grid-template-columns: repeat(auto-fill,minmax(clamp(46px,6.3vw,72px),1fr));gap: 7px 6px;padding: 3px 2px 10px; }
+  .inventory-card { max-width: 84px;gap: 3px; }
+  .inventory-card > small { font-size: 6px;line-height: 1.05; }
+  .cosmetic-grid { grid-template-columns: repeat(auto-fill,minmax(88px,1fr));gap: 6px;padding: 3px 2px 9px; }
+  .cosmetic-card { min-height: 126px;padding: 7px 5px; }
+  .cosmetic-avatar-preview,.cosmetic-frame-preview,.avatar-color-preview { width: clamp(42px,8vw,58px);height: clamp(42px,8vw,58px); }
+}
+
+@media (orientation: landscape) and (max-width: 700px) {
+  .main-menu-content { width: calc(100vw - 92px); }
+  .main-menu-shortcuts { grid-template-columns: repeat(3,minmax(0,1fr)); }
+  .menu-player-card { max-width: min(190px, 34vw); }
+  .menu-avatar-frame:not(.large) { width: clamp(34px,8vw,46px);height: clamp(34px,8vw,46px); }
+  .top-hud { grid-template-columns: minmax(84px,1fr) auto minmax(70px,.9fr) auto; }
+  .top-hud .opponents { width: min(440px,68vw); }
+  .top-hud .opponent-pill { min-width: 0; }
+  .table-wrap { width: calc(100vw - 12px); }
+  .loot-panel { width: min(78%,620px); }
+  .hand-zone { width: min(55vw,390px); }
+  .game-action-stack { right: max(5px,env(safe-area-inset-right)); }
+  .live-chat-panel { width: min(320px,calc(100vw - 24px)); }
+  .inventory-page { inset: 0;border-radius: 0; }
+  .inventory-header { min-height: 48px;flex-basis: 48px;grid-template-columns: auto minmax(0,1fr) auto;padding: 3px 6px; }
+  .inventory-header .back-button { min-height: 28px;padding: 3px 5px;font-size: 6px; }
+  .inventory-title h1 { font-size: clamp(14px,4dvh,19px); }
+  .collection-count { min-width: 58px;height: 30px;padding: 2px 4px; }
+  .shop-categories { min-height: 31px;flex-basis: 31px;flex-wrap: nowrap;justify-content: flex-start;gap: 3px;padding: 2px 4px;overflow-x: auto; }
+  .shop-categories button { min-height: 24px;padding: 3px 6px;font-size: 6px; }
+  .inventory-body { min-height: 0;grid-template-columns: minmax(88px,19vw) minmax(0,1fr);gap: 4px;padding: 3px; }
+  .inventory-sidebar { min-width: 0;min-height: 0;max-height: none;overflow-y: auto; }
+  .inventory-sidebar .selected-preview { overflow: visible; }
+  .inventory-catalog { min-width: 0;min-height: 0;overflow: hidden; }
+  .inventory-catalog.deck-catalog { overflow: hidden; }
+  .catalog-scroll-area { min-width: 0;min-height: 0;overflow: auto; }
+  .collection-filters { grid-template-columns: repeat(2,minmax(0,1fr));gap: 3px;padding: 2px 0 4px; }
+  .collection-filters button { min-height: 29px;padding: 3px;font-size: 6px; }
+  .collection-filters button small { display: none; }
+  .card-grid { grid-template-columns: repeat(auto-fill,minmax(39px,1fr));gap: 4px;padding: 2px 1px 7px; }
+  .inventory-card { max-width: 66px;gap: 2px; }
+  .inventory-card > small { font-size: 5px; }
+  .cosmetic-grid { grid-template-columns: repeat(auto-fill,minmax(70px,1fr));gap: 4px;padding: 2px 1px 6px; }
+  .cosmetic-card { height: auto;min-height: 102px;padding: 4px 3px;gap: 3px; }
+  .cosmetic-avatar-preview,.cosmetic-frame-preview,.avatar-color-preview { width: clamp(34px,9vw,46px);height: clamp(34px,9vw,46px); }
+  .cosmetic-card > strong { font-size: 6px; }
+  .cosmetic-card > small { font-size: 5px; }
+  .cosmetic-card > button { min-height: 19px;padding: 2px;font-size: 5px; }
+}
