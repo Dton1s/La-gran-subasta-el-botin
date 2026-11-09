@@ -1820,7 +1820,24 @@ export default function App() {
           setAccountWalletMessage("");
         } else await accountWalletRefreshRef.current();
       }).catch(async (error: unknown) => {
-        setAccountWalletMessage(error instanceof Error ? `No se pudo actualizar el monedero: ${error.message}` : "No se pudo actualizar el monedero de cuenta.");
+        const rawMessage = error instanceof Error ? error.message : "";
+        const message = rawMessage.includes("daily_coin_earning_limit")
+          ? "Has alcanzado el límite diario de monedas obtenidas jugando."
+          : rawMessage.includes("daily_gem_earning_limit")
+            ? "Has alcanzado el límite diario de gemas obtenidas jugando."
+            : rawMessage.includes("insufficient_funds")
+              ? "El saldo de cuenta no alcanza para completar esta operación."
+              : rawMessage ? `No se pudo actualizar el monedero: ${rawMessage}` : "No se pudo actualizar el monedero de cuenta.";
+        setAccountWalletMessage(message);
+        const latest = profileRef.current;
+        const rolledBack = { ...latest } as PlayerProfile;
+        for (const key of Object.keys(next) as (keyof PlayerProfile)[]) {
+          if (key === "coins" || key === "gems") continue;
+          if (latest[key] === next[key] && latest[key] !== previous[key]) (rolledBack as any)[key] = previous[key];
+        }
+        profileRef.current = rolledBack;
+        setProfile(rolledBack);
+        savePlayerProfile(rolledBack, authSession.user.id);
         await accountWalletRefreshRef.current();
       });
     }
