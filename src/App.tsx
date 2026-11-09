@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import type { Session } from "@supabase/supabase-js";
 import { supabase, supabaseConfigured, supabaseRedirectUrl } from "./lib/supabase";
+import { REAL_MONEY_CATALOG, formatPackagePrice } from "./data/realMoneyCatalog";
 
 type IconName =
   | "gem"
@@ -1133,14 +1134,14 @@ function CollectionEmblem({ type }: { type: string }) {
   );
 }
 
-function InventoryPage({ onBack, equippedCollections, onEquip, onPurchase, ownedCards, coins, gems, ownedAvatars, ownedFrames, equippedFrame, currentAvatar, equippedAvatarColor, ownedChatEmotes, onPurchaseChatEmote, onPurchaseCosmetic, onChooseAvatar, onEquipFrame, mode, onChangeMode }: { onBack: () => void; equippedCollections: string[]; onEquip: (id: string) => void; onPurchase: (id: string) => void; ownedCards: string[]; coins: number; gems: number; ownedAvatars: string[]; ownedFrames: string[]; equippedFrame: string; currentAvatar: string; equippedAvatarColor: string; ownedChatEmotes: string[]; onPurchaseChatEmote: (id: string) => void; onPurchaseCosmetic: (kind: "avatar" | "frame", id: string) => void; onChooseAvatar: (avatar: string) => void; onEquipFrame: (frame: string) => void; mode: "inventory" | "shop"; onChangeMode: (mode: "inventory" | "shop") => void }) {
+function InventoryPage({ onBack, equippedCollections, onEquip, onPurchase, ownedCards, coins, gems, accountWallet, ownedAvatars, ownedFrames, equippedFrame, currentAvatar, equippedAvatarColor, ownedChatEmotes, onPurchaseChatEmote, onPurchaseCosmetic, onChooseAvatar, onEquipFrame, mode, onChangeMode }: { onBack: () => void; equippedCollections: string[]; onEquip: (id: string) => void; onPurchase: (id: string) => void; ownedCards: string[]; coins: number; gems: number; accountWallet: { coins: number; gems: number } | null; ownedAvatars: string[]; ownedFrames: string[]; equippedFrame: string; currentAvatar: string; equippedAvatarColor: string; ownedChatEmotes: string[]; onPurchaseChatEmote: (id: string) => void; onPurchaseCosmetic: (kind: "avatar" | "frame", id: string) => void; onChooseAvatar: (avatar: string) => void; onEquipFrame: (frame: string) => void; mode: "inventory" | "shop"; onChangeMode: (mode: "inventory" | "shop") => void }) {
   const initialShopCollection = cardCollections.find((collection) => collection.price > 0)?.id ?? "all";
   const [filter, setFilter] = useState(mode === "inventory" && equippedCollections.length ? equippedCollections[0] : mode === "shop" ? initialShopCollection : "basica");
   const [selectedCard, setSelectedCard] = useState(mode === "shop" ? "basica-7" : "basica-1");
-  const [shopSection, setShopSection] = useState<"decks" | "avatars" | "frames" | "emojis">("decks");
+  const [shopSection, setShopSection] = useState<"decks" | "packages" | "gems" | "avatars" | "frames" | "emojis">("decks");
   const [emojiFilter, setEmojiFilter] = useState<"todos" | ChatEmoteCategory>("todos");
   useEffect(() => { setFilter(mode === "inventory" ? equippedCollections[0] ?? "basica" : initialShopCollection); }, [mode, equippedCollections, initialShopCollection]);
-  useEffect(() => { if (mode === "inventory" && shopSection === "emojis") setShopSection("decks"); }, [mode, shopSection]);
+  useEffect(() => { if (mode === "inventory" && (shopSection === "packages" || shopSection === "gems" || shopSection === "emojis")) setShopSection("decks"); }, [mode, shopSection]);
   const setCards = inventoryCards.map((card) => ({ ...card, status: mode === "shop" || ownedCards.includes(card.cardKey) ? "available" as const : "locked" as const }));
   const catalogCards = mode === "shop" ? setCards.filter((card) => card.cardPrice > 0) : setCards;
   const visibleCards = filter === "all" ? catalogCards : catalogCards.filter((card) => card.id === filter);
@@ -1149,8 +1150,13 @@ function InventoryPage({ onBack, equippedCollections, onEquip, onPurchase, owned
   const selectedSetEquipped = equippedCollections.includes(selected.id);
   const availableCount = ownedCards.length;
   const availableEmotes = ownedChatEmotes.length;
-  const cosmeticTabs: { id: "decks" | "avatars" | "frames" | "emojis"; label: string }[] = [{ id: "decks", label: "BARAJAS" }, { id: "avatars", label: "AVATARES" }, { id: "frames", label: "MARCOS" }, ...(mode === "shop" ? [{ id: "emojis" as const, label: "EMOJIS DE CHAT" }] : [])];
-  const sectionTitle = shopSection === "avatars" ? "AVATARES" : shopSection === "frames" ? "MARCOS CUADRADOS" : "EMOJIS DE CHAT";
+  const cosmeticTabs: { id: "decks" | "packages" | "gems" | "avatars" | "frames" | "emojis"; label: string }[] = [
+    { id: "decks", label: "CARTAS" },
+    ...(mode === "shop" ? [{ id: "packages" as const, label: "PAQUETES" }, { id: "gems" as const, label: "SOLO GEMAS" }] : []),
+    { id: "avatars", label: "AVATARES" }, { id: "frames", label: "MARCOS" },
+    ...(mode === "shop" ? [{ id: "emojis" as const, label: "EMOJIS DE CHAT" }] : []),
+  ];
+  const sectionTitle = shopSection === "avatars" ? "AVATARES" : shopSection === "frames" ? "MARCOS CUADRADOS" : shopSection === "packages" ? "PAQUETES DE SUBASTA" : shopSection === "gems" ? "COMPRAR SOLO GEMAS" : "EMOJIS DE CHAT";
   const paidEmotes = chatEmotes.filter((emote) => chatEmotePrice(emote) > 0);
   const storeEmoteTabs = chatEmoteCategoryTabs.filter((tab) => tab.id === "todos" || tab.id !== "normales");
   const filteredEmotes = paidEmotes.filter((emote) => emojiFilter === "todos" || emote.category === emojiFilter);
@@ -1161,11 +1167,11 @@ function InventoryPage({ onBack, equippedCollections, onEquip, onPurchase, owned
         <button className="back-button" onClick={onBack}><span>‹</span>VOLVER A LA MESA</button>
         <div className="inventory-title">
           <span>COLECCIÓN DEL JUGADOR</span>
-          <h1>{mode === "shop" ? shopSection === "emojis" ? "TIENDA DE EMOJIS" : "TIENDA DE COLECCIONES" : "INVENTARIO DE CARTAS"}</h1>
-          <p>{mode === "shop" ? shopSection === "emojis" ? "Desbloquea reacciones para usar directamente en el chat." : "Cartas con monedas. Avatares y marcos cosméticos con gemas." : "Gestiona tus barajas y equipa avatares y marcos cuadrados."}</p>
+          <h1>{mode === "shop" ? shopSection === "emojis" ? "TIENDA DE EMOJIS" : shopSection === "packages" || shopSection === "gems" ? "TIENDA DE GEMAS" : "TIENDA DE COLECCIONES" : "INVENTARIO DE CARTAS"}</h1>
+          <p>{mode === "shop" ? shopSection === "emojis" ? "Desbloquea reacciones para usar directamente en el chat." : shopSection === "packages" || shopSection === "gems" ? "Paquetes en euros · acreditación segura tras confirmación de pago." : "Cartas con monedas. Avatares y marcos cosméticos con gemas." : "Gestiona tus barajas y equipa avatares y marcos cuadrados."}</p>
           <nav className="catalog-mode" aria-label="Sección de colecciones"><button className={mode === "shop" ? "active" : ""} onClick={() => onChangeMode("shop")}>TIENDA</button><button className={mode === "inventory" ? "active" : ""} onClick={() => onChangeMode("inventory")}>INVENTARIO</button></nav>
         </div>
-        <div className="collection-count"><GameIcon name={mode === "shop" && shopSection === "emojis" ? "chat" : "cards"} size={35} /><div><strong>{mode === "shop" && shopSection === "emojis" ? availableEmotes : availableCount}</strong><span>{mode === "shop" && shopSection === "emojis" ? "EMOJIS DESBLOQUEADOS" : "CARTAS EN PROPIEDAD"}</span></div><em>/ {mode === "shop" && shopSection === "emojis" ? paidEmotes.length : inventoryCards.length}</em></div>
+        <div className="collection-count"><GameIcon name={mode === "shop" && shopSection === "emojis" ? "chat" : mode === "shop" && (shopSection === "packages" || shopSection === "gems") ? "gem" : "cards"} size={35} /><div><strong>{mode === "shop" && shopSection === "emojis" ? availableEmotes : mode === "shop" && (shopSection === "packages" || shopSection === "gems") ? REAL_MONEY_CATALOG.filter((item) => item.kind === (shopSection === "gems" ? "gems" : "bundle")).length : availableCount}</strong><span>{mode === "shop" && shopSection === "emojis" ? "EMOJIS DESBLOQUEADOS" : mode === "shop" && (shopSection === "packages" || shopSection === "gems") ? "PAQUETES DISPONIBLES" : "CARTAS EN PROPIEDAD"}</span></div><em>/ {mode === "shop" && shopSection === "emojis" ? paidEmotes.length : mode === "shop" && (shopSection === "packages" || shopSection === "gems") ? "7" : inventoryCards.length}</em></div>
       </header>
       <nav className="shop-categories" aria-label={mode === "shop" ? "Categorías de tienda" : "Categorías de inventario"}>{cosmeticTabs.map((tab) => <button key={tab.id} className={shopSection === tab.id ? "active" : ""} onClick={() => setShopSection(tab.id)}>{tab.label}</button>)}</nav>
       <div className={`inventory-body ${shopSection !== "decks" ? "shop-cosmetic-mode" : ""}`}>
@@ -1176,7 +1182,7 @@ function InventoryPage({ onBack, equippedCollections, onEquip, onPurchase, owned
           </div>
         </aside>}
         <div className={`inventory-catalog ${shopSection === "decks" ? "deck-catalog" : "cosmetic-catalog-wrap"}`}>
-          {shopSection === "emojis" ? <section className="cosmetic-catalog emoji-shop-catalog"><div className="catalog-heading"><div><span>REACCIONES PARA EL CHAT</span><strong>EMOJIS DESBLOQUEABLES</strong></div><p>{gems} 💎</p></div><p className="emoji-shop-note">Los emojis gratuitos están en tu chat. Aquí solo aparecen colecciones premium: 30, 60 o 100 gemas.</p><nav className="emoji-shop-filters" aria-label="Filtrar emojis de la tienda">{storeEmoteTabs.map((tab) => { const count = tab.id === "todos" ? paidEmotes.length : paidEmotes.filter((emote) => emote.category === tab.id).length; return <button key={tab.id} className={emojiFilter === tab.id ? "active" : ""} onClick={() => setEmojiFilter(tab.id)}>{tab.label}<small>{count}</small></button>; })}</nav><div className="cosmetic-grid chat-emote-store-grid">{filteredEmotes.map((emote) => { const owned = ownedChatEmotes.includes(emote.id); const price = chatEmotePrice(emote); return <article className={`cosmetic-card chat-emote-store-card ${owned ? "owned" : "locked"}`} key={emote.id}><div className="chat-emote-store-preview"><ChatEmoteImage emote={emote} />{!owned && <span className="chat-emote-lock" aria-label="Bloqueado">🔒</span>}</div><strong>{emote.label}</strong><small>{`${price} 💎 · ${emote.category.toUpperCase()}`}</small><button disabled={owned || gems < price} onClick={() => onPurchaseChatEmote(emote.id)}>{owned ? "OBTENIDO" : `COMPRAR · ${price} 💎`}</button></article>; })}</div></section> : shopSection !== "decks" ? <section className="cosmetic-catalog"><div className="catalog-heading"><div><span>{mode === "shop" ? "PERSONALIZA TU PERFIL" : "COSMÉTICOS EN PROPIEDAD"}</span><strong>{sectionTitle}</strong></div><p>{coins} 🪙 · {gems} 💎</p></div>
+          {(shopSection === "packages" || shopSection === "gems") ? <section className="cosmetic-catalog real-money-catalog"><div className="catalog-heading"><div><span>XSOLLA · PROYECTO 320352 · MONEDERO DE CUENTA</span><strong>{sectionTitle}</strong></div><p>{accountWallet ? <>{accountWallet.coins.toLocaleString("es-ES")} 🪙 · {accountWallet.gems.toLocaleString("es-ES")} 💎</> : "Saldo de cuenta no disponible"}</p></div><p className="real-money-intro">{shopSection === "gems" ? "Paquetes de gemas sin monedas adicionales." : "Incluyen gemas premium y monedas para cartas, entradas y otros gastos de la mesa."} Los premios son fijos; no hay recompensas aleatorias en estas compras.</p><div className="real-money-pack-grid">{REAL_MONEY_CATALOG.filter((item) => item.kind === (shopSection === "gems" ? "gems" : "bundle")).map((item) => <article className={`real-money-pack-card ${item.featured ? "featured" : ""}`} key={item.sku}>{item.featured && <span className="real-money-featured">MÁS ELEGIDO</span>}<div className="real-money-pack-gems"><GameIcon name="gem" size={30} /><strong>{item.gems.toLocaleString("es-ES")}</strong><small>GEMAS</small></div><strong className="real-money-pack-title">{item.name}</strong>{item.coins > 0 ? <span className="real-money-pack-coins">+ {item.coins.toLocaleString("es-ES")} 🪙</span> : <span className="real-money-pack-coins">Solo gemas</span>}<b className="real-money-price">{formatPackagePrice(item.priceCents)}</b><button type="button" disabled title="El pago se habilitará al configurar las claves privadas y el catálogo de Xsolla">EN CONFIGURACIÓN</button></article>)}</div><p className="real-money-setup-note" role="status">Las compras aún no están activadas. Primero se configura el catálogo de Xsolla y el servidor de pagos; el saldo se acreditará solo al recibir una confirmación verificada.</p></section> : shopSection === "emojis" ? <section className="cosmetic-catalog emoji-shop-catalog"><div className="catalog-heading"><div><span>REACCIONES PARA EL CHAT</span><strong>EMOJIS DESBLOQUEABLES</strong></div><p>{gems} 💎</p></div><p className="emoji-shop-note">Los emojis gratuitos están en tu chat. Aquí solo aparecen colecciones premium: 30, 60 o 100 gemas.</p><nav className="emoji-shop-filters" aria-label="Filtrar emojis de la tienda">{storeEmoteTabs.map((tab) => { const count = tab.id === "todos" ? paidEmotes.length : paidEmotes.filter((emote) => emote.category === tab.id).length; return <button key={tab.id} className={emojiFilter === tab.id ? "active" : ""} onClick={() => setEmojiFilter(tab.id)}>{tab.label}<small>{count}</small></button>; })}</nav><div className="cosmetic-grid chat-emote-store-grid">{filteredEmotes.map((emote) => { const owned = ownedChatEmotes.includes(emote.id); const price = chatEmotePrice(emote); return <article className={`cosmetic-card chat-emote-store-card ${owned ? "owned" : "locked"}`} key={emote.id}><div className="chat-emote-store-preview"><ChatEmoteImage emote={emote} />{!owned && <span className="chat-emote-lock" aria-label="Bloqueado">🔒</span>}</div><strong>{emote.label}</strong><small>{`${price} 💎 · ${emote.category.toUpperCase()}`}</small><button disabled={owned || gems < price} onClick={() => onPurchaseChatEmote(emote.id)}>{owned ? "OBTENIDO" : `COMPRAR · ${price} 💎`}</button></article>; })}</div></section> : shopSection !== "decks" ? <section className="cosmetic-catalog"><div className="catalog-heading"><div><span>{mode === "shop" ? "PERSONALIZA TU PERFIL" : "COSMÉTICOS EN PROPIEDAD"}</span><strong>{sectionTitle}</strong></div><p>{coins} 🪙 · {gems} 💎</p></div>
             {shopSection === "avatars" && <div className="cosmetic-grid">{avatarStoreItems.filter((item) => mode !== "shop" || item.price > 0).map((item) => { const owned = ownedAvatars.includes(item.id); const afford = (item.currency === "gems" ? gems : coins) >= item.price; return <article className={`cosmetic-card ${owned ? "owned" : "locked"}`} key={item.id}><div className={`cosmetic-avatar-preview ${avatarFrameClass(equippedFrame)}`} style={avatarDisplayStyle(item.id)}><AvatarFace avatar={item.id} />{mode === "shop" && !owned && <span className="store-item-lock" aria-label="Bloqueado"><GameIcon name="lock" size={20} /></span>}</div><strong>{item.name}</strong><small className="avatar-kind-note">{item.id.startsWith("avatar-fondo-") ? "Fondo integrado en el avatar" : item.id.startsWith("avatar-transparente-") ? "Avatar sin fondo integrado" : "Avatar clásico"}</small><small>{item.price} {item.currency === "gems" ? "💎" : "🪙"}</small><button disabled={mode === "shop" ? owned || !afford : !owned || currentAvatar === item.id} onClick={() => mode === "shop" ? onPurchaseCosmetic("avatar", item.id) : onChooseAvatar(item.id)}>{mode === "shop" ? owned ? "OBTENIDO" : "COMPRAR" : currentAvatar === item.id ? "EQUIPADO" : "EQUIPAR"}</button></article>; })}</div>}
             {shopSection === "frames" && <div className="cosmetic-grid frame-grid">{avatarFrameStoreItems.filter((item) => mode !== "shop" || item.price > 0).map((item) => { const owned = ownedFrames.includes(item.id); const afford = gems >= item.price; return <article className={`cosmetic-card ${owned ? "owned" : "locked"}`} key={item.id}><div className={`cosmetic-frame-preview ${avatarFrameClass(item.id)}`} style={{ "--avatar-fill": equippedAvatarColor } as React.CSSProperties}><AvatarFace avatar={currentAvatar} />{mode === "shop" && !owned && <span className="store-item-lock" aria-label="Bloqueado"><GameIcon name="lock" size={20} /></span>}</div><strong>{item.name}</strong><small>{`${item.price} 💎`}</small><button disabled={mode === "shop" ? owned || !afford : !owned || equippedFrame === item.id} onClick={() => mode === "shop" ? onPurchaseCosmetic("frame", item.id) : onEquipFrame(item.id)}>{mode === "shop" ? owned ? "OBTENIDO" : "COMPRAR" : equippedFrame === item.id ? "EQUIPADO" : "EQUIPAR"}</button></article>; })}</div>}
           </section> : <>
@@ -1239,6 +1245,10 @@ export default function App() {
   const [profile, setProfile] = useState(readPlayerProfile);
   const profileRef = useRef(profile);
   const wallet = { coins: profile.coins, gems: profile.gems };
+  const [accountWallet, setAccountWallet] = useState<{ coins: number; gems: number } | null>(null);
+  const [accountWalletLoading, setAccountWalletLoading] = useState(false);
+  const [accountWalletMessage, setAccountWalletMessage] = useState("");
+  const accountWalletRefreshRef = useRef<() => Promise<void>>(async () => {});
   const [profileNameDraft, setProfileNameDraft] = useState(profile.name);
   const [profileMessage, setProfileMessage] = useState("");
   const [authSession, setAuthSession] = useState<Session | null>(null);
@@ -1575,13 +1585,14 @@ export default function App() {
     profileRef.current = accountProfile;
     setProfile(accountProfile);
     setProfileNameDraft(accountProfile.name);
-    void supabase.from("profiles").select("display_name, username, avatar_id").eq("id", userId).maybeSingle().then(({ data, error }) => {
+    void supabase.from("profiles").select("display_name, username, username_changed_at, avatar_id").eq("id", userId).maybeSingle().then(({ data, error }) => {
       if (!active) return;
       if (error) { setAuthMessage("No se pudo cargar el perfil. Comprueba que la migración de usuarios esté aplicada en Supabase."); setUsernameRequired(true); setUsernameMessage("Falta configurar los nombres de usuario en la base de datos."); setUsernameChecked(true); return; }
       if (!data) { setAuthMessage("Cuenta conectada. El perfil se creará al completar el primer registro."); setUsernameRequired(true); setUsernameChecked(true); return; }
       const current = readPlayerProfile(userId);
       const avatar = profileAvatarOptionsAll.includes(data.avatar_id) ? data.avatar_id : current.avatar;
-      const next = { ...current, name: data.username || data.display_name || current.name, avatar };
+      const lastNameChange = data.username_changed_at ? Date.parse(data.username_changed_at) : 0;
+      const next = { ...current, name: data.username || data.display_name || current.name, avatar, lastNameChange: Number.isFinite(lastNameChange) ? lastNameChange : 0 };
       profileRef.current = next;
       setProfile(next);
       setProfileNameDraft(next.name);
@@ -1592,6 +1603,50 @@ export default function App() {
       setAuthMessage("");
     });
     return () => { active = false; };
+  }, [authSession?.user.id]);
+
+  useEffect(() => {
+    if (!supabase || !authSession) {
+      setAccountWallet(null);
+      setAccountWalletLoading(false);
+      accountWalletRefreshRef.current = async () => {};
+      return;
+    }
+    let active = true;
+    let requestPending = false;
+    const refresh = async () => {
+      if (!active || requestPending) return;
+      requestPending = true;
+      setAccountWalletLoading(true);
+      const { data, error } = await supabase.from("player_wallets").select("coins,gems").eq("user_id", authSession.user.id).maybeSingle();
+      if (active) {
+        if (error) {
+          setAccountWalletMessage("No se pudo leer el monedero seguro de la cuenta.");
+        } else if (!data) {
+          setAccountWallet(null);
+          setAccountWalletMessage("La cuenta todavía no tiene un monedero inicializado.");
+        } else {
+          setAccountWallet({ coins: Math.max(0, Number(data.coins) || 0), gems: Math.max(0, Number(data.gems) || 0) });
+          setAccountWalletMessage("");
+        }
+        setAccountWalletLoading(false);
+      }
+      requestPending = false;
+    };
+    accountWalletRefreshRef.current = refresh;
+    void refresh();
+    const poll = window.setInterval(() => {
+      if (document.visibilityState === "visible") void refresh();
+    }, 20_000);
+    const onFocus = () => { void refresh(); };
+    window.addEventListener("focus", onFocus);
+    return () => {
+      active = false;
+      requestPending = false;
+      window.clearInterval(poll);
+      window.removeEventListener("focus", onFocus);
+      accountWalletRefreshRef.current = async () => {};
+    };
   }, [authSession?.user.id]);
 
   useEffect(() => {
@@ -2669,8 +2724,7 @@ export default function App() {
         <div className="menu-coin-spark spark-a">✦</div><div className="menu-coin-spark spark-b">✧</div>
         <div className="menu-board-art auth-board-art" aria-hidden="true"><div className="menu-board-card card-one"><GeminiCardFace deckId="cuchillo" value={3} /></div><div className="menu-board-card card-two"><GeminiCardFace deckId="escudo" value={7} /></div><div className="menu-board-card card-three"><GeminiCardFace deckId="dorado" value={5} /></div><img className="menu-board-coin" src={publicAsset("sigma/ui/diamond.png")} alt="" /></div>
         <section className="auth-menu-content">
-          <div className="game-logo-kicker">LA GRAN SUBASTA:</div>
-          <h1 className="game-logo">EL <span>BOTÍN</span></h1>
+          <img className="brand-logo-image auth-brand-logo" src={publicAsset("sigma/ui/la-gran-subasta-logo.png")} alt="La gran subasta: El botín" />
           <p className="menu-tagline">Inicia sesión o crea tu cuenta para entrar en la subasta.</p>
           <section className="account-panel auth-entry-card" aria-labelledby="account-entry-title">
             <div className="account-panel-heading"><span><small>BIENVENIDO A LA MESA</small><strong id="account-entry-title">{authMode === "login" ? "INICIAR SESIÓN" : "CREAR CUENTA"}</strong></span></div>
@@ -2698,7 +2752,7 @@ export default function App() {
         <div className="ambient ambient-one" /><div className="ambient ambient-two" />
         <div className="menu-board-art auth-board-art" aria-hidden="true"><div className="menu-board-card card-one"><GeminiCardFace deckId="cuchillo" value={3} /></div><div className="menu-board-card card-two"><GeminiCardFace deckId="escudo" value={7} /></div><div className="menu-board-card card-three"><GeminiCardFace deckId="dorado" value={5} /></div></div>
         <section className="auth-menu-content username-onboarding">
-          <div className="game-logo-kicker">LA GRAN SUBASTA:</div><h1 className="game-logo">EL <span>BOTÍN</span></h1>
+          <img className="brand-logo-image auth-brand-logo" src={publicAsset("sigma/ui/la-gran-subasta-logo.png")} alt="La gran subasta: El botín" />
           <p className="menu-tagline">Elige tu nick para que los demás te encuentren en la mesa.</p>
           <section className="account-panel auth-entry-card" aria-labelledby="username-title">
             <div className="account-panel-heading"><span><small>IDENTIDAD DE JUGADOR</small><strong id="username-title">TU NOMBRE DE USUARIO</strong></span></div>
@@ -2726,7 +2780,8 @@ export default function App() {
       .slice(0, 50);
     const nameCooldownMs = 30 * 24 * 60 * 60 * 1000;
     const nameCooldownLeft = Math.max(0, nameCooldownMs - (Date.now() - profile.lastNameChange));
-    const canChangeName = nameCooldownLeft === 0 && /^[A-Za-z0-9]{5,16}$/.test(profileNameDraft.trim()) && profileNameDraft.trim() !== profile.name && profile.gems >= NAME_CHANGE_GEMS;
+    const renameGems = authSession ? (accountWallet?.gems ?? 0) : profile.gems;
+    const canChangeName = nameCooldownLeft === 0 && /^[A-Za-z0-9]{5,16}$/.test(profileNameDraft.trim()) && profileNameDraft.trim() !== profile.name && renameGems >= NAME_CHANGE_GEMS;
     const rouletteCooldown = profile.lastSpinTime ? Math.max(0, 24 * 60 * 60 * 1000 - (rouletteNow - profile.lastSpinTime)) : 0;
     const rouletteReady = rouletteCooldown === 0;
     const rouletteTimeLabel = `${Math.floor(rouletteCooldown / 3_600_000)}h ${Math.floor((rouletteCooldown % 3_600_000) / 60_000)}m`;
@@ -2759,8 +2814,7 @@ export default function App() {
 
         {screen === "menu" ? <>
           <section className="main-menu-content">
-            <div className="game-logo-kicker">LA GRAN SUBASTA:</div>
-            <h1 className="game-logo">EL <span>BOTÍN</span></h1>
+            <img className="brand-logo-image menu-brand-logo" src={publicAsset("sigma/ui/la-gran-subasta-logo.png")} alt="La gran subasta: El botín" />
             <p className="menu-tagline">La mesa está lista. ¿Te atreves a pujar?</p>
             <div className="play-mode-actions">
               <button className="play-now-button play-offline-button" onClick={() => { playSfx("click"); setScreen("modes"); }}><span className="play-icon">▶</span><span><strong>JUGAR OFFLINE</strong><small>CON RIVALES IA</small></span><b>›</b></button>
@@ -2867,16 +2921,29 @@ export default function App() {
                 <p className="account-status">Conectado como <strong>{authSession?.user.email ?? "cuenta Google"}</strong>. El perfil público se sincroniza con esta cuenta.</p>
                 {authMessage && <p className="account-feedback" role="status">{authMessage}</p>}
               </section>}
+              {!localPreview && authSession && <section className="account-wallet-card" aria-label="Monedero seguro de la cuenta">
+                <div className="account-wallet-heading"><span><small>SALDO EN SUPABASE</small><strong>MONEDERO SEGURO DE CUENTA</strong></span><button type="button" onClick={() => void accountWalletRefreshRef.current()} disabled={accountWalletLoading}>{accountWalletLoading ? "ACTUALIZANDO…" : "ACTUALIZAR"}</button></div>
+                <div className="account-wallet-balances"><span><img src={publicAsset("sigma/ui/coin.png")} alt="" />{accountWallet?.coins.toLocaleString("es-ES") ?? (accountWalletLoading ? "…" : "—")} <small>MONEDAS</small></span><span><img src={publicAsset("sigma/ui/diamond.png")} alt="" />{accountWallet?.gems.toLocaleString("es-ES") ?? (accountWalletLoading ? "…" : "—")} <small>GEMAS</small></span></div>
+                {accountWalletMessage && <p className="account-wallet-message" role="status">{accountWalletMessage}</p>}
+                <p className="account-wallet-note">El saldo offline del juego sigue guardándose en este navegador ({profile.coins.toLocaleString("es-ES")} 🪙 · {profile.gems.toLocaleString("es-ES")} 💎). Los pagos confirmados se acreditan aquí desde el servidor.</p>
+              </section>}
               <div className="profile-season-ranks"><span className="menu-section-kicker">TUS RANGOS · TEMPORADA ACTUAL</span>{(["classic", "teams", "duel"] as GameMode[]).map((mode) => { const wins = profile.winsByPeriod.monthly[mode].player ?? 0; const rank = rankForWins(wins); return <div className="profile-season-rank" key={mode}><img src={rankBadgeUrl(rank.asset)} alt="" /><span><small>{modeTitles[mode]}</small><strong>{rank.name}</strong><em>{wins} victorias este mes</em><em>{rank.next === Infinity ? "Rango máximo" : `Faltan ${Math.max(0, rank.next - wins)} para ${rank.nextName}`}</em><em>+{rank.coins} 🪙 · +{rank.gems} 💎 al cierre</em></span></div>; })}</div>
               <div className="profile-name-edit"><label htmlFor="captain-name">NOMBRE DE USUARIO</label><div><input id="captain-name" maxLength={16} value={profileNameDraft} onChange={(event) => setProfileNameDraft(event.target.value.replace(/[^A-Za-z0-9]/g, ""))} /><button disabled={!canChangeName || socialBusy} onClick={async () => {
                 const nextName = profileNameDraft.trim();
                 if (nameCooldownLeft > 0) { setProfileMessage(`Podrás cambiarlo de nuevo en ${Math.ceil(nameCooldownLeft / (24 * 60 * 60 * 1000))} días.`); return; }
-                if (!/^[A-Za-z0-9]{5,16}$/.test(nextName) || nextName === profile.name || profile.gems < NAME_CHANGE_GEMS || !supabase) return;
+                if (!/^[A-Za-z0-9]{5,16}$/.test(nextName) || nextName === profile.name || renameGems < NAME_CHANGE_GEMS || !supabase || !authSession) return;
                 setSocialBusy(true);
                 const { data, error } = await supabase.rpc("claim_username", { requested_username: nextName });
-                if (error || data !== "ok") { setProfileMessage(data === "taken" ? "Este nick ya existe. Prueba con otro." : error?.message ?? "No se pudo actualizar el nick."); setSocialBusy(false); return; }
-                commitProfile({ ...profile, name: nextName, gems: profile.gems - NAME_CHANGE_GEMS, lastNameChange: Date.now() });
-                setProfileMessage(`Nombre actualizado. Coste: ${NAME_CHANGE_GEMS} gemas.`); setSocialBusy(false); playSfx("handWin");
+                if (error || data !== "ok") {
+                  const message = data === "taken" ? "Este nick ya existe. Prueba con otro."
+                    : data === "cooldown" ? "El cambio de nick tiene un enfriamiento de 30 días."
+                    : data === "insufficient_gems" ? "Necesitas 250 gemas en el monedero de cuenta."
+                    : error?.message ?? "No se pudo actualizar el nick.";
+                  setProfileMessage(message); setSocialBusy(false); return;
+                }
+                commitProfile({ ...profile, name: nextName, lastNameChange: Date.now() });
+                void accountWalletRefreshRef.current();
+                setProfileMessage(`Nombre actualizado. Coste: ${NAME_CHANGE_GEMS} gemas del monedero de cuenta.`); setSocialBusy(false); playSfx("handWin");
               }}>CAMBIAR · {NAME_CHANGE_GEMS} 💎</button></div><small>{nameCooldownLeft > 0 ? `Cambio disponible en ${Math.ceil(nameCooldownLeft / (24 * 60 * 60 * 1000))} días.` : "5–16 letras o números. El cambio se puede hacer una vez cada 30 días."}</small>{profileMessage && <small className="profile-feedback">{profileMessage}</small>}</div>
               <div className="profile-stats"><div><b>{profile.winsByMode.classic.player}</b><span>VICTORIAS 4P</span></div><div><b>{profile.winsByMode.teams.player}</b><span>VICTORIAS 2v2</span></div><div><b>{profile.winsByMode.duel.player}</b><span>VICTORIAS 1v1</span></div></div>
               <button className="profile-collection-link" onClick={() => { playSfx("click"); setPage("inventory"); }}>VER MI INVENTARIO <span>›</span></button>
@@ -2924,6 +2991,7 @@ export default function App() {
           ownedCards={profile.ownedCards}
           coins={profile.coins}
           gems={profile.gems}
+          accountWallet={accountWallet}
           ownedAvatars={profile.ownedAvatars}
           ownedFrames={profile.ownedFrames}
           ownedChatEmotes={profile.ownedChatEmotes}

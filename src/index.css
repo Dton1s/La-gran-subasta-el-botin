@@ -2468,6 +2468,46 @@ canvas { display:block;width:100%;height:100%;object-fit:contain; }
   .prize-card.secret .prize-art:has(.revealed-effect-art) + .prize-copy span { overflow:hidden;font-size:6px;line-height:1.05;text-overflow:ellipsis;white-space:nowrap; }
 }
 
+/* Brand mark and real-money catalog */
+.brand-logo-image { display:block;width:clamp(240px,34vw,390px);max-height:min(20dvh,190px);height:auto;margin:0 auto;object-fit:contain;filter:drop-shadow(0 7px 5px #1b1019a8);animation:logo-bob 3.6s ease-in-out infinite; }
+.auth-brand-logo { width:clamp(220px,27vw,330px);max-height:min(19dvh,160px); }
+.menu-brand-logo { width:clamp(270px,33vw,390px);max-height:min(23dvh,205px); }
+.real-money-catalog { min-height:0; }
+.real-money-intro { margin:0 4px 10px;color:#d1bbc2;font-size:clamp(9px,.8vw,12px);line-height:1.5; }
+.real-money-pack-grid { display:grid;grid-template-columns:repeat(auto-fit,minmax(min(180px,100%),1fr));gap:10px;align-content:start;padding:4px 2px 16px; }
+.real-money-pack-card { position:relative;display:flex;min-height:168px;flex-direction:column;align-items:center;gap:6px;padding:16px 12px 12px;border:1px solid #765640;border-radius:15px;background:radial-gradient(circle at 50% 0%,#6c432d70,transparent 44%),linear-gradient(145deg,#352631,#211a28);box-shadow:0 4px 0 #130f18,inset 0 1px #ffffff12;text-align:center; }
+.real-money-pack-card.featured { border-color:#f0c65c;box-shadow:0 4px 0 #130f18,0 0 14px #e6a84244,inset 0 1px #ffffff20; }
+.real-money-featured { position:absolute;top:-7px;right:9px;padding:3px 6px;border-radius:7px;background:linear-gradient(#ffe18a,#dc942d);color:#382317;font-size:7px;font-weight:1000;letter-spacing:.06em; }
+.real-money-pack-gems { display:grid;grid-template-columns:auto auto;align-items:center;column-gap:7px;color:#b8f1ff; }
+.real-money-pack-gems svg { grid-row:span 2;filter:drop-shadow(0 2px 4px #25c7e966); }
+.real-money-pack-gems strong { color:#fff2c7;font:1000 22px "Baloo 2",sans-serif;line-height:1; }
+.real-money-pack-gems small { color:#d5c2bf;font-size:7px;font-weight:900;letter-spacing:.14em;text-align:left; }
+.real-money-pack-title { color:#ffe3a0;font:900 12px "Baloo 2",sans-serif; }
+.real-money-pack-coins { min-height:15px;color:#f4cf7c;font-size:9px;font-weight:900; }
+.real-money-price { margin-top:auto;color:#fff4d1;font:1000 16px "Baloo 2",sans-serif; }
+.real-money-pack-card > button { width:100%;padding:7px 8px;border:1px solid #685763;border-radius:8px;background:#3b323f;color:#b4a5ae;font-size:8px;font-weight:900;cursor:not-allowed; }
+.real-money-setup-note { margin:3px 3px 10px;padding:9px 11px;border:1px solid #8d6b3b;border-radius:9px;background:#382b285e;color:#e3c989;font-size:9px;line-height:1.45; }
+@media (max-width:600px) {
+  .brand-logo-image { width:min(62vw,310px);max-height:15dvh; }
+  .menu-brand-logo { width:min(68vw,330px);max-height:18dvh; }
+  .real-money-pack-grid { grid-template-columns:repeat(auto-fit,minmax(130px,1fr));gap:7px; }
+  .real-money-pack-card { min-height:146px;padding:13px 8px 9px; }
+}
+
+.account-wallet-card { margin:0 0 12px;padding:10px 12px;border:1px solid #5f947d;border-radius:11px;background:linear-gradient(135deg,#20252b,#1e2830);text-align:left;box-shadow:inset 0 1px #ffffff0a; }
+.account-wallet-heading { display:flex;align-items:center;justify-content:space-between;gap:8px; }
+.account-wallet-heading > span { display:flex;flex-direction:column;gap:2px; }
+.account-wallet-heading small { color:#8bd8ad;font-size:7px;font-weight:1000;letter-spacing:.14em; }
+.account-wallet-heading strong { color:#f4e2b2;font:900 11px "Baloo 2",sans-serif;letter-spacing:.04em; }
+.account-wallet-heading button { padding:5px 8px;border:1px solid #507763;border-radius:7px;background:#263b36;color:#c4ecd2;font-size:7px;font-weight:900; }
+.account-wallet-heading button:disabled { opacity:.6;cursor:wait; }
+.account-wallet-balances { display:flex;gap:16px;margin-top:8px; }
+.account-wallet-balances > span { display:flex;align-items:center;gap:5px;color:#fff0c8;font:900 14px "Baloo 2",sans-serif; }
+.account-wallet-balances img { width:17px;height:17px;object-fit:contain; }
+.account-wallet-balances small { color:#bfaeae;font:800 7px "Nunito",sans-serif;letter-spacing:.08em; }
+.account-wallet-note,.account-wallet-message { margin:6px 0 0;color:#adbec0;font-size:8px;line-height:1.4; }
+.account-wallet-message { color:#ffcd7a; }
+
 .collection-filters { grid-template-columns:repeat(7,minmax(0,1fr)); }
 /* Reveal the full bid cards in a wider, lifted row above the player's hand. */
 .revealed-zone { left:50%;bottom:10%;width:72%;height:27%;min-height:124px;transform:translateX(-50%); }
