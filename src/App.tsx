@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import type { Provider, Session } from "@supabase/supabase-js";
+import type { Session } from "@supabase/supabase-js";
 import { supabase, supabaseConfigured, supabaseRedirectUrl } from "./lib/supabase";
 
 type IconName =
@@ -345,7 +345,7 @@ const soundFiles = {
   score: publicAsset("sigma/audio/oneshots/score_tick_01.ogg"),
 };
 
-type AppScreen = "menu" | "modes" | "game" | "settings" | "ranking" | "season-ranking" | "profile" | "missions" | "roulette";
+type AppScreen = "auth" | "menu" | "modes" | "online-modes" | "social" | "game" | "settings" | "ranking" | "season-ranking" | "profile" | "missions" | "roulette";
 
 type GameMode = "classic" | "teams" | "duel";
 type VictoryMode = "classic" | "teams" | "duel";
@@ -359,6 +359,12 @@ type ScheduledGameEvent = { id: string; period: "DIARIO" | "SEMANAL" | "MENSUAL"
 type LiveChatMessage = { id: string; sender: string; avatar: string; text?: string; emoteId?: string; time: number; isUser?: boolean };
 type PlayerCard = { value: number; deckId: string; effectId?: CardEffectId };
 type MatchPlayer = { id: string; name: string; avatar: string; score: number; hand: PlayerCard[]; team: 1 | 2 | 0; isUser: boolean };
+type OnlinePublicProfile = { id: string; username: string | null; display_name: string; avatar_id: string; avatar_color?: string; frame_id?: string };
+type OnlineFriendship = { requester_id: string; addressee_id: string; status: "pending" | "accepted" };
+type OnlinePartyInvite = { id: string; party_id: string; inviter_id: string; invitee_id: string; status: "pending" | "accepted" | "declined" };
+type OnlineRosterPlayer = { id: string; username: string; avatar: string; deckIds: string[]; ownedCards: string[]; team: 1 | 2 | 0 };
+type OnlineMatchSetup = { id: string; mode: GameMode; hostId: string; roster: OnlineRosterPlayer[]; players: MatchPlayer[]; rules: RoundRule[]; lootValues: number[]; lootEffect: LootEffect };
+type PausableGameTimeout = { callback: () => void; remainingMs: number; startedAt: number; timeoutId: number | null; start: () => void };
 type LootEffect = { type: string; label: string; value: number; icon: string; colors: [string, string]; description?: string };
 type PlayerMission = { id: string; desc: string; metric: string; period: "diaria" | "semanal" | "mensual"; difficulty: "FÁCIL" | "MEDIA" | "DIFÍCIL"; resetAt: number; target: number; progress: number; rewardAmt: number; rewardType: "coins" | "gems"; claimed: boolean };
 type PlayerProfile = {
@@ -1000,7 +1006,7 @@ function PrizeCard({
       <div className="prize-corner">★</div>
       <div className="prize-art">
         {secret ? (
-          <img className="secret-card-back" src={publicAsset("sigma/ui/card_back.png")} alt="Reverso de la carta secreta" />
+          <><img className="secret-card-back" src={publicAsset("sigma/ui/card_back.png")} alt="Reverso de la carta secreta" /><span className="secret-question" aria-hidden="true">?</span></>
         ) : effect ? (
           <div className="revealed-effect-art" style={{ "--effect-a": effect.colors[0], "--effect-b": effect.colors[1] } as React.CSSProperties}>
             <span>{effect.icon}</span>
@@ -1188,7 +1194,25 @@ function InventoryPage({ onBack, equippedCollections, onEquip, onPurchase, owned
 }
 
 export default function App() {
-  const [screen, setScreen] = useState<AppScreen>("menu");
+  const [isFullscreen, setIsFullscreen] = useState(Boolean(document.fullscreenElement));
+  useEffect(() => {
+    const updateFullscreen = () => setIsFullscreen(Boolean(document.fullscreenElement));
+    document.addEventListener("fullscreenchange", updateFullscreen);
+    return () => document.removeEventListener("fullscreenchange", updateFullscreen);
+  }, []);
+  const toggleFullscreen = () => {
+    if (document.fullscreenElement) void document.exitFullscreen();
+    else void document.documentElement.requestFullscreen?.();
+  };
+  const fullscreenButton = (className = "fullscreen-toggle") => (
+    <button type="button" className={className} onClick={toggleFullscreen} aria-label={isFullscreen ? "Salir de pantalla completa" : "Pantalla completa"} title={isFullscreen ? "Salir de pantalla completa" : "Pantalla completa"}>
+      <span aria-hidden="true">⛶</span><span className="fullscreen-label">{isFullscreen ? "SALIR" : "PANTALLA COMPLETA"}</span>
+    </button>
+  );
+  const [screen, setScreen] = useState<AppScreen>("auth");
+  const [orientationBlocked, setOrientationBlocked] = useState(false);
+  const orientationBlockedRef = useRef(false);
+  const pausableGameTimeoutsRef = useRef(new Set<PausableGameTimeout>());
   const [homeUtilityPanel, setHomeUtilityPanel] = useState<"events" | "chests" | null>(null);
   const [rulesOpen, setRulesOpen] = useState(false);
   const [selected, setSelected] = useState<number | null>(null);
@@ -1196,6 +1220,8 @@ export default function App() {
   const [bidPlaced, setBidPlaced] = useState(false);
   const [turnSeconds, setTurnSeconds] = useState(30);
   const [round, setRound] = useState(1);
+  const activeRoundRef = useRef(1);
+  activeRoundRef.current = round;
   const [roundRules, setRoundRules] = useState<RoundRule[]>([]);
   const [gameMode, setGameMode] = useState<GameMode>("classic");
   const [matchPlayers, setMatchPlayers] = useState<MatchPlayer[]>([]);
@@ -1216,11 +1242,41 @@ export default function App() {
   const [profileNameDraft, setProfileNameDraft] = useState(profile.name);
   const [profileMessage, setProfileMessage] = useState("");
   const [authSession, setAuthSession] = useState<Session | null>(null);
+  const [localPreview, setLocalPreview] = useState(false);
+  const [authBootComplete, setAuthBootComplete] = useState(false);
   const [authMode, setAuthMode] = useState<"login" | "register">("login");
   const [authEmail, setAuthEmail] = useState("");
   const [authPassword, setAuthPassword] = useState("");
   const [authBusy, setAuthBusy] = useState(false);
   const [authMessage, setAuthMessage] = useState("");
+  const [usernameDraft, setUsernameDraft] = useState("");
+  const [usernameRequired, setUsernameRequired] = useState(false);
+  const [usernameChecked, setUsernameChecked] = useState(false);
+  const [usernameMessage, setUsernameMessage] = useState("");
+  const [socialProfiles, setSocialProfiles] = useState<OnlinePublicProfile[]>([]);
+  const [friendProfiles, setFriendProfiles] = useState<OnlinePublicProfile[]>([]);
+  const [pendingFriendProfiles, setPendingFriendProfiles] = useState<OnlinePublicProfile[]>([]);
+  const [partyProfiles, setPartyProfiles] = useState<OnlinePublicProfile[]>([]);
+  const [friendships, setFriendships] = useState<OnlineFriendship[]>([]);
+  const [partyInvites, setPartyInvites] = useState<OnlinePartyInvite[]>([]);
+  const [partyId, setPartyId] = useState<string | null>(null);
+  const [socialBusy, setSocialBusy] = useState(false);
+  const [socialMessage, setSocialMessage] = useState("");
+  const [onlineUserIds, setOnlineUserIds] = useState<string[]>([]);
+  const [onlineQueueMode, setOnlineQueueMode] = useState<GameMode | null>(null);
+  const [onlineQueueCount, setOnlineQueueCount] = useState(1);
+  const [onlineQueueMessage, setOnlineQueueMessage] = useState("");
+  const [onlineMatch, setOnlineMatch] = useState<OnlineMatchSetup | null>(null);
+  const [onlineRoomReady, setOnlineRoomReady] = useState(false);
+  const [onlineSubmittedBids, setOnlineSubmittedBids] = useState<Record<string, number>>({});
+  const onlinePresenceRef = useRef<ReturnType<NonNullable<typeof supabase>["channel"]> | null>(null);
+  const onlineQueueChannelRef = useRef<ReturnType<NonNullable<typeof supabase>["channel"]> | null>(null);
+  const onlineGameChannelRef = useRef<ReturnType<NonNullable<typeof supabase>["channel"]> | null>(null);
+  const onlineResolvedRoundRef = useRef(0);
+  const socialRefreshRef = useRef<() => Promise<void>>(async () => {});
+  const onlineMatchHandlerRef = useRef<(setup: OnlineMatchSetup) => void>(() => {});
+  const onlineRoundAdvanceHandlerRef = useRef<(payload: any) => void>(() => {});
+  const onlineFinishMatchRef = useRef<(players: MatchPlayer[]) => void>(() => {});
   const [rankingMode, setRankingMode] = useState<GameMode>("classic");
   const [rankingPeriod, setRankingPeriod] = useState<RankingPeriod>("total");
   const [missionTab, setMissionTab] = useState<PlayerMission["period"]>("diaria");
@@ -1257,6 +1313,211 @@ export default function App() {
   const removeGemCost = Math.min(CARD_REMOVAL_BASE_GEMS + removalsUsedThisMatch * CARD_REMOVAL_INCREMENT_GEMS, CARD_REMOVAL_MAX_GEMS);
   const activeMenuEvents = getActiveEvents(new Date(serviceNow));
 
+  const refreshSocialData = async () => {
+    if (!supabase || !authSession) return;
+    const userId = authSession.user.id;
+    const [friendResult, inviteResult, partyResult] = await Promise.all([
+      supabase.from("game_friendships").select("requester_id,addressee_id,status").or(`requester_id.eq.${userId},addressee_id.eq.${userId}`),
+      supabase.from("game_party_invites").select("id,party_id,inviter_id,invitee_id,status").or(`inviter_id.eq.${userId},invitee_id.eq.${userId}`).eq("status", "pending"),
+      supabase.from("game_party_members").select("party_id").eq("user_id", userId).maybeSingle(),
+    ]);
+    if (friendResult.error || inviteResult.error) { setSocialMessage("No se pudieron cargar las listas. Comprueba que la migración social esté aplicada."); return; }
+    const friendRows = (friendResult.data ?? []) as OnlineFriendship[];
+    const invites = (inviteResult.data ?? []) as OnlinePartyInvite[];
+    setFriendships(friendRows);
+    setPartyInvites(invites);
+    const acceptedIds = friendRows.filter((edge) => edge.status === "accepted").map((edge) => edge.requester_id === userId ? edge.addressee_id : edge.requester_id);
+    const incomingIds = invites.filter((invite) => invite.invitee_id === userId).map((invite) => invite.inviter_id);
+    const outgoingIds = invites.filter((invite) => invite.inviter_id === userId).map((invite) => invite.invitee_id);
+    const profileIds = [...new Set([...acceptedIds, ...incomingIds, ...outgoingIds])];
+    if (profileIds.length) {
+      const { data } = await supabase.from("profiles").select("id,username,display_name,avatar_id,avatar_color,frame_id").in("id", profileIds);
+      const profiles = (data ?? []) as OnlinePublicProfile[];
+      setFriendProfiles(profiles.filter((p) => acceptedIds.includes(p.id)));
+      setPendingFriendProfiles(profiles.filter((p) => friendRows.some((edge) => edge.status === "pending" && edge.addressee_id === userId && edge.requester_id === p.id)));
+    } else { setFriendProfiles([]); setPendingFriendProfiles([]); }
+    const activePartyId = partyResult.data?.party_id ?? null;
+    setPartyId(activePartyId);
+    if (activePartyId) {
+      const { data: members } = await supabase.from("game_party_members").select("user_id").eq("party_id", activePartyId);
+      const memberIds = (members ?? []).map((member) => member.user_id);
+      const { data: memberProfiles } = memberIds.length ? await supabase.from("profiles").select("id,username,display_name,avatar_id,avatar_color,frame_id").in("id", memberIds) : { data: [] };
+      setPartyProfiles((memberProfiles ?? []) as OnlinePublicProfile[]);
+    } else setPartyProfiles([]);
+  };
+
+  const refreshRandomPlayers = async () => {
+    if (!supabase || !authSession) return;
+    setSocialBusy(true);
+    try {
+      const { data, error } = await supabase.from("profiles").select("id,username,display_name,avatar_id,avatar_color,frame_id").not("username", "is", null).neq("id", authSession.user.id).limit(120);
+      if (error) throw error;
+      const knownIds = new Set([...friendships.flatMap((edge) => [edge.requester_id, edge.addressee_id]), ...partyInvites.flatMap((invite) => [invite.inviter_id, invite.invitee_id]), authSession.user.id]);
+      const candidates = ((data ?? []) as OnlinePublicProfile[]).filter((item) => item.username && !knownIds.has(item.id));
+      for (let index = candidates.length - 1; index > 0; index -= 1) { const target = Math.floor(Math.random() * (index + 1)); [candidates[index], candidates[target]] = [candidates[target], candidates[index]]; }
+      setSocialProfiles(candidates.slice(0, 8));
+      setSocialMessage("");
+    } catch (error) { setSocialMessage(error instanceof Error ? error.message : "No se pudieron actualizar las sugerencias."); }
+    finally { setSocialBusy(false); }
+  };
+
+  socialRefreshRef.current = refreshSocialData;
+
+  const scheduleGameTimeout = (callback: () => void, delayMs: number) => {
+    const task: PausableGameTimeout = { callback, remainingMs: delayMs, startedAt: 0, timeoutId: null, start: () => {} };
+    task.start = () => {
+      task.startedAt = performance.now();
+      task.timeoutId = window.setTimeout(() => {
+        pausableGameTimeoutsRef.current.delete(task);
+        task.callback();
+      }, task.remainingMs);
+    };
+    pausableGameTimeoutsRef.current.add(task);
+    if (!orientationBlockedRef.current) task.start();
+  };
+
+  useEffect(() => {
+    const updateViewport = () => {
+      // Match the layout viewport used by CSS media queries. visualViewport can
+      // be wider/taller than the CSS viewport in Chrome's device toolbar and
+      // while browser chrome or the on-screen keyboard is changing.
+      const width = document.documentElement.clientWidth || window.innerWidth;
+      const height = document.documentElement.clientHeight || window.innerHeight;
+      const touchCapable = window.matchMedia("(pointer: coarse)").matches || navigator.maxTouchPoints > 0;
+      const shouldBlock = touchCapable && width <= 1024 && height > width;
+      if (shouldBlock === orientationBlockedRef.current) return;
+      orientationBlockedRef.current = shouldBlock;
+      setOrientationBlocked(shouldBlock);
+      for (const task of pausableGameTimeoutsRef.current) {
+        if (shouldBlock && task.timeoutId !== null) {
+          window.clearTimeout(task.timeoutId);
+          task.timeoutId = null;
+          task.remainingMs = Math.max(0, task.remainingMs - (performance.now() - task.startedAt));
+        } else if (!shouldBlock && task.timeoutId === null) task.start();
+      }
+    };
+    updateViewport();
+    window.addEventListener("resize", updateViewport, { passive: true });
+    window.addEventListener("orientationchange", updateViewport, { passive: true });
+    window.visualViewport?.addEventListener("resize", updateViewport, { passive: true });
+    return () => {
+      window.removeEventListener("resize", updateViewport);
+      window.removeEventListener("orientationchange", updateViewport);
+      window.visualViewport?.removeEventListener("resize", updateViewport);
+      for (const task of pausableGameTimeoutsRef.current) if (task.timeoutId !== null) window.clearTimeout(task.timeoutId);
+      pausableGameTimeoutsRef.current.clear();
+    };
+  }, []);
+
+  useEffect(() => {
+    const inGameSurface = (target: EventTarget | null) => target instanceof Element ? target.closest(".game-shell") : null;
+    const preventContextMenu = (event: Event) => {
+      if (inGameSurface(event.target) && (window.matchMedia("(pointer: coarse)").matches || navigator.maxTouchPoints > 0)) event.preventDefault();
+    };
+    const preventGesture = (event: Event) => { if (inGameSurface(event.target)) event.preventDefault(); };
+    const preventGamePageScroll = (event: TouchEvent) => {
+      if (!inGameSurface(event.target) || (event.target instanceof Element && event.target.closest(".live-chat-panel, .inventory-page, .menu-subpanel"))) return;
+      event.preventDefault();
+    };
+    document.addEventListener("contextmenu", preventContextMenu);
+    document.addEventListener("gesturestart", preventGesture, { passive: false });
+    document.addEventListener("touchmove", preventGamePageScroll, { passive: false });
+    return () => {
+      document.removeEventListener("contextmenu", preventContextMenu);
+      document.removeEventListener("gesturestart", preventGesture);
+      document.removeEventListener("touchmove", preventGamePageScroll);
+    };
+  }, []);
+
+  useEffect(() => {
+    if (!orientationBlocked) return;
+    const overlay = document.createElement("div");
+    overlay.className = "orientation-warning";
+    overlay.setAttribute("role", "alert");
+    overlay.setAttribute("aria-live", "assertive");
+    overlay.innerHTML = '<span class="orientation-warning-icon" aria-hidden="true">↻</span><strong>Por favor, gira tu dispositivo en horizontal para jugar</strong><small>La partida continuará al volver a la posición horizontal.</small>';
+    document.body.appendChild(overlay);
+    return () => overlay.remove();
+  }, [orientationBlocked]);
+
+  useEffect(() => {
+    if (screen !== "social" || !authSession || usernameRequired) return;
+    const refreshId = window.setInterval(() => { void socialRefreshRef.current(); }, 10000);
+    return () => window.clearInterval(refreshId);
+  }, [screen, authSession?.user.id, usernameRequired]);
+
+  useEffect(() => {
+    if (!supabase || !authSession || !usernameChecked || usernameRequired) return;
+    const client = supabase;
+    const userId = authSession.user.id;
+    const channel = client.channel("sigma:online-presence", { config: { presence: { key: userId } } });
+    onlinePresenceRef.current = channel;
+    channel.on("presence", { event: "sync" }, () => setOnlineUserIds(Object.keys(channel.presenceState())));
+    channel.subscribe((status) => {
+      if (status === "SUBSCRIBED") void channel.track({ user_id: userId, username: profile.name, avatar: profile.avatar, party_id: partyId, active_at: Date.now() });
+    });
+    return () => { onlinePresenceRef.current = null; void client.removeChannel(channel); };
+  }, [authSession?.user.id, usernameChecked, usernameRequired, profile.name, profile.avatar, partyId]);
+
+  useEffect(() => {
+    if (!supabase || !authSession || !onlineMatch) { setOnlineRoomReady(false); return; }
+    const client = supabase;
+    const ownId = authSession.user.id;
+    const channel = client.channel(`sigma:match:${onlineMatch.id}`, { config: { broadcast: { ack: true, self: false } } });
+    onlineGameChannelRef.current = channel;
+    channel.on("broadcast", { event: "bid" }, ({ payload }) => {
+      if (payload?.match_id !== onlineMatch.id || payload?.round !== activeRoundRef.current) return;
+      setOnlineSubmittedBids((current) => ({ ...current, [payload.player_id]: payload.card_index }));
+    });
+    channel.on("broadcast", { event: "round-reveal" }, ({ payload }) => {
+      if (payload?.round !== activeRoundRef.current) return;
+      setBidPlaced(true);
+      setSelected(null);
+      setRevealedBids(payload.bids);
+      setResolutionStage("bids");
+      setResolutionMessage("");
+      setAnimationKey((key) => key + 1);
+      playSfx("flip");
+    });
+    channel.on("broadcast", { event: "loot-reveal" }, ({ payload }) => {
+      if (payload?.round !== activeRoundRef.current) return;
+      setLootEffect(payload.lootEffect);
+      setRevealedLoot(true);
+      setResolutionStage("loot");
+      playSfx("flip");
+    });
+    channel.on("broadcast", { event: "round-result" }, ({ payload }) => {
+      if (payload?.round !== activeRoundRef.current) return;
+      const players = (payload.players as MatchPlayer[]).map((player) => ({ ...player, isUser: player.id === ownId }));
+      setMatchPlayers(players);
+      setHandValues(players.find((player) => player.isUser)?.hand ?? []);
+      setResolutionStage("result");
+      setResolutionWinnerIds(payload.winnerIds ?? []);
+      setRoundScoreChanges(payload.scoreChanges ?? []);
+      setResolutionMessage(payload.message ?? "");
+      if ((payload.winnerIds ?? []).includes(ownId)) commitProfile(advanceMission(profileRef.current, "roundWins"));
+      if ((payload.winnerIds ?? []).includes(ownId)) playSfx("handWin"); else playSfx("handLose");
+    });
+    channel.on("broadcast", { event: "round-next" }, ({ payload }) => onlineRoundAdvanceHandlerRef.current(payload));
+    channel.on("broadcast", { event: "match-finished" }, ({ payload }) => {
+      const players = (payload.players as MatchPlayer[]).map((player) => ({ ...player, isUser: player.id === ownId }));
+      setMatchPlayers(players);
+      setHandValues(players.find((player) => player.isUser)?.hand ?? []);
+      onlineFinishMatchRef.current(players);
+    });
+    channel.on("broadcast", { event: "chat" }, ({ payload }) => {
+      if (!payload || payload.sender_id === ownId) return;
+      const emote = chatEmotes.find((item) => item.id === payload.emoteId);
+      if (typeof payload.text === "string" || emote) setChatMessages((current) => [...current.slice(-49), { id: crypto.randomUUID(), sender: String(payload.sender ?? "Jugador").slice(0, 20), avatar: String(payload.avatar ?? "🐱"), text: typeof payload.text === "string" ? payload.text.slice(0, 180) : undefined, emoteId: emote?.id, time: Date.now() }]);
+    });
+    channel.subscribe((status) => setOnlineRoomReady(status === "SUBSCRIBED"));
+    return () => {
+      onlineGameChannelRef.current = null;
+      setOnlineRoomReady(false);
+      void client.removeChannel(channel);
+    };
+  }, [authSession?.user.id, onlineMatch?.id]);
+
   useEffect(() => {
     setServiceNow(Date.now());
     const interval = window.setInterval(() => setServiceNow(Date.now()), 1000);
@@ -1264,15 +1525,28 @@ export default function App() {
   }, []);
 
   useEffect(() => {
-    if (!supabase) return;
+    if (!supabase) { setAuthBootComplete(true); return; }
     let mounted = true;
+    const applySession = (session: Session | null) => {
+      if (session) {
+        setUsernameChecked(false);
+        setUsernameRequired(false);
+        setUsernameMessage("");
+        const accountProfile = readPlayerProfile(session.user.id);
+        profileRef.current = accountProfile;
+        setProfile(accountProfile);
+        setProfileNameDraft(accountProfile.name);
+      }
+      setAuthSession(session);
+      setAuthBootComplete(true);
+    };
     void supabase.auth.getSession().then(({ data, error }) => {
       if (!mounted) return;
       if (error) setAuthMessage("No se pudo recuperar la sesión. Vuelve a iniciar sesión.");
-      setAuthSession(data.session);
+      applySession(data.session);
     });
     const { data: { subscription } } = supabase.auth.onAuthStateChange((_event, session) => {
-      if (mounted) setAuthSession(session);
+      if (mounted) applySession(session);
     });
     return () => {
       mounted = false;
@@ -1284,29 +1558,48 @@ export default function App() {
     if (!supabase || !authSession) return;
     let active = true;
     const userId = authSession.user.id;
-    void supabase.from("profiles").select("display_name, avatar_id").eq("id", userId).maybeSingle().then(({ data, error }) => {
+    const accountProfile = readPlayerProfile(userId);
+    profileRef.current = accountProfile;
+    setProfile(accountProfile);
+    setProfileNameDraft(accountProfile.name);
+    void supabase.from("profiles").select("display_name, username, avatar_id").eq("id", userId).maybeSingle().then(({ data, error }) => {
       if (!active) return;
-      if (error) { setAuthMessage("La sesión está activa, pero no se pudo cargar el perfil de Supabase."); return; }
-      if (!data) { setAuthMessage("Cuenta conectada. El perfil se creará al completar el primer registro."); return; }
+      if (error) { setAuthMessage("No se pudo cargar el perfil. Comprueba que la migración de usuarios esté aplicada en Supabase."); setUsernameRequired(true); setUsernameMessage("Falta configurar los nombres de usuario en la base de datos."); setUsernameChecked(true); return; }
+      if (!data) { setAuthMessage("Cuenta conectada. El perfil se creará al completar el primer registro."); setUsernameRequired(true); setUsernameChecked(true); return; }
       const current = readPlayerProfile(userId);
       const avatar = profileAvatarOptionsAll.includes(data.avatar_id) ? data.avatar_id : current.avatar;
-      const next = { ...current, name: data.display_name || current.name, avatar };
+      const next = { ...current, name: data.username || data.display_name || current.name, avatar };
       profileRef.current = next;
       setProfile(next);
       setProfileNameDraft(next.name);
       savePlayerProfile(next, userId);
+      setUsernameDraft(data.username ?? "");
+      setUsernameRequired(!data.username);
+      setUsernameChecked(true);
       setAuthMessage("");
     });
     return () => { active = false; };
   }, [authSession?.user.id]);
 
   useEffect(() => {
-    if (authSession) return;
-    const offlineProfile = readPlayerProfile();
-    profileRef.current = offlineProfile;
-    setProfile(offlineProfile);
-    setProfileNameDraft(offlineProfile.name);
-  }, [authSession?.user.id]);
+    if (!authBootComplete) return;
+    if (localPreview) {
+      setPage("game");
+      setScreen((current) => current === "auth" ? "menu" : current);
+      return;
+    }
+    if (authSession) {
+      if (!usernameChecked || usernameRequired) return;
+      setPage("game");
+      if (window.location.hash === "#inventario" || window.location.hash === "#tienda") window.history.replaceState(null, "", `${window.location.pathname}${window.location.search}`);
+      setScreen((current) => current === "auth" ? "menu" : current);
+    } else {
+      setPage("game");
+      setScreen("auth");
+      setPanel(null);
+      setHomeUtilityPanel(null);
+    }
+  }, [authSession?.user.id, authBootComplete, usernameChecked, usernameRequired, localPreview]);
 
   useEffect(() => {
     const music = new Audio(publicAsset("sigma/audio/Raise_or_Fold_loop.ogg"));
@@ -1329,10 +1622,10 @@ export default function App() {
   }, [audioSettings]);
 
   useEffect(() => {
-    if (screen !== "game" || page !== "game" || bidPlaced) return;
-    const timerId = window.setInterval(() => setTurnSeconds((seconds) => Math.max(0, seconds - 1)), 1000);
+    if (screen !== "game" || page !== "game" || orientationBlocked || (bidPlaced && !onlineMatch)) return;
+    const timerId = window.setInterval(() => setTurnSeconds((seconds) => orientationBlockedRef.current ? seconds : Math.max(0, seconds - 1)), 1000);
     return () => window.clearInterval(timerId);
-  }, [screen, page, bidPlaced]);
+  }, [screen, page, bidPlaced, onlineMatch?.id, orientationBlocked]);
 
   useEffect(() => {
     if (screen !== "game" || page !== "game") return;
@@ -1363,7 +1656,7 @@ export default function App() {
         socket.onclose = () => setChatConnection("local");
         socket.onerror = () => setChatConnection("local");
       } catch { setChatConnection("local"); }
-    } else setChatConnection("local");
+    } else setChatConnection(onlineMatch ? "online" : "local");
     return () => {
       channel?.close();
       if (chatChannelRef.current === channel) chatChannelRef.current = null;
@@ -1371,7 +1664,7 @@ export default function App() {
       if (socket) { socket.close(); chatSocketRef.current = null; }
       setChatConnection("local");
     };
-  }, [screen, page, chatSessionId]);
+  }, [screen, page, chatSessionId, onlineMatch?.id]);
 
   useEffect(() => {
     if (screen !== "roulette") return;
@@ -1404,7 +1697,8 @@ export default function App() {
     const message: LiveChatMessage = { id: `${Date.now()}-${Math.random().toString(36).slice(2)}`, sender: profileRef.current.name, avatar: profileRef.current.avatar, text, emoteId, time: Date.now(), isUser: true };
     setChatMessages((current) => [...current.slice(-49), message]);
     const wireMessage = { type: "chat", roomId: chatRoomId.current, sender: message.sender, avatar: message.avatar, text, emoteId };
-    if (chatSocketRef.current?.readyState === WebSocket.OPEN) chatSocketRef.current.send(JSON.stringify(wireMessage));
+    if (onlineMatch && authSession) void onlineGameChannelRef.current?.send({ type: "broadcast", event: "chat", payload: { sender_id: authSession.user.id, sender: message.sender, avatar: message.avatar, text, emoteId } });
+    else if (chatSocketRef.current?.readyState === WebSocket.OPEN) chatSocketRef.current.send(JSON.stringify(wireMessage));
     else chatChannelRef.current?.postMessage(message);
     playSfx("click", 0.35);
   };
@@ -1413,7 +1707,7 @@ export default function App() {
     const previous = profileRef.current;
     profileRef.current = next;
     setProfile(next);
-    savePlayerProfile(next, authSession?.user.id);
+    savePlayerProfile(next, localPreview ? "local-preview" : authSession?.user.id);
     if (supabase && authSession && (next.name !== previous.name || next.avatar !== previous.avatar)) {
       void supabase.from("profiles").update({ display_name: next.name, avatar_id: next.avatar }).eq("id", authSession.user.id).then(({ error }) => {
         if (error) setAuthMessage("Cambios guardados localmente, pero no se sincronizó el perfil remoto.");
@@ -1451,12 +1745,124 @@ export default function App() {
     }
   };
 
-  const signInWithProvider = async (provider: Provider) => {
+  const checkUsernameAvailability = async () => {
+    if (!supabase || !authSession) return;
+    const username = usernameDraft.trim();
+    if (!/^[A-Za-z0-9]{5,16}$/.test(username)) {
+      setUsernameChecked(false);
+      setUsernameMessage("Usa entre 5 y 16 caracteres: solo letras y números.");
+      return;
+    }
+    setSocialBusy(true);
+    setUsernameMessage("");
+    try {
+      const { data, error } = await supabase.rpc("check_username_available", { requested_username: username });
+      if (error) throw error;
+      if (!data) {
+        setUsernameChecked(false);
+        setUsernameMessage("Este nick ya existe. Prueba con otro.");
+      } else {
+        setUsernameChecked(true);
+        setUsernameMessage("Nick disponible. Puedes continuar.");
+      }
+    } catch (error) {
+      setUsernameChecked(false);
+      setUsernameMessage(error instanceof Error ? error.message : "No se pudo comprobar el nick.");
+    } finally { setSocialBusy(false); }
+  };
+
+  const saveUsername = async () => {
+    if (!supabase || !authSession) return;
+    const username = usernameDraft.trim();
+    if (!/^[A-Za-z0-9]{5,16}$/.test(username)) { setUsernameChecked(false); setUsernameMessage("Usa entre 5 y 16 caracteres: solo letras y números."); return; }
+    setSocialBusy(true);
+    setUsernameMessage("");
+    try {
+      const { data, error } = await supabase.rpc("claim_username", { requested_username: username });
+      if (error) throw error;
+      if (data === "taken") { setUsernameChecked(false); setUsernameMessage("Este nick ya existe. Prueba con otro."); return; }
+      if (data !== "ok") { setUsernameChecked(false); setUsernameMessage(data === "invalid" ? "Formato no válido. Solo letras y números, entre 5 y 16 caracteres." : "No se pudo guardar el nick. Vuelve a intentarlo."); return; }
+      const next = { ...profileRef.current, name: username };
+      profileRef.current = next;
+      setProfile(next);
+      setProfileNameDraft(username);
+      savePlayerProfile(next, authSession.user.id);
+      setUsernameRequired(false);
+      setUsernameChecked(true);
+      setScreen("menu");
+      playSfx("handWin");
+    } catch (error) { setUsernameChecked(false); setUsernameMessage(error instanceof Error ? error.message : "No se pudo guardar el nick."); }
+    finally { setSocialBusy(false); }
+  };
+
+  const sendFriendRequest = async (targetId: string) => {
+    if (!supabase) return;
+    setSocialBusy(true);
+    try {
+      const { data, error } = await supabase.rpc("send_friend_request", { target_user: targetId });
+      if (error) throw error;
+      setSocialMessage(data === "sent" ? "Solicitud enviada." : data === "exists" ? "Ya hay una solicitud o amistad con este jugador." : "No se encontró ese jugador.");
+      await refreshSocialData();
+      await refreshRandomPlayers();
+    } catch (error) { setSocialMessage(error instanceof Error ? error.message : "No se pudo enviar la solicitud."); }
+    finally { setSocialBusy(false); }
+  };
+
+  const acceptFriendRequest = async (requesterId: string) => {
+    if (!supabase || !authSession) return;
+    setSocialBusy(true);
+    const { error } = await supabase.from("game_friendships").update({ status: "accepted" }).eq("requester_id", requesterId).eq("addressee_id", authSession.user.id);
+    setSocialMessage(error ? error.message : "Amistad añadida.");
+    await refreshSocialData();
+    await refreshRandomPlayers();
+    setSocialBusy(false);
+  };
+
+  const removeFriend = async (friendId: string) => {
+    if (!supabase || !authSession) return;
+    setSocialBusy(true);
+    const userId = authSession.user.id;
+    const { error } = await supabase.from("game_friendships").delete().or(`and(requester_id.eq.${userId},addressee_id.eq.${friendId}),and(requester_id.eq.${friendId},addressee_id.eq.${userId})`);
+    setSocialMessage(error ? error.message : "Amigo eliminado de la lista.");
+    await refreshSocialData();
+    await refreshRandomPlayers();
+    setSocialBusy(false);
+  };
+
+  const createGameParty = async () => {
+    if (!supabase) return;
+    setSocialBusy(true);
+    const { data, error } = await supabase.rpc("create_game_party");
+    if (error) setSocialMessage(error.message);
+    else { setPartyId(data as string); setSocialMessage("Grupo creado. Invita a un amigo para completar tu equipo 2v2."); await refreshSocialData(); }
+    setSocialBusy(false);
+  };
+
+  const inviteFriendToParty = async (friendId: string) => {
+    if (!supabase || !partyId) return;
+    setSocialBusy(true);
+    const { error } = await supabase.rpc("invite_to_game_party", { target_party: partyId, target_user: friendId });
+    setSocialMessage(error ? error.message : "Invitación de grupo enviada.");
+    await refreshSocialData();
+    setSocialBusy(false);
+  };
+
+  const answerPartyInvite = async (inviteId: string, accept: boolean) => {
+    if (!supabase) return;
+    setSocialBusy(true);
+    const { data, error } = await supabase.rpc("respond_to_game_party_invite", { invite_id: inviteId, accept_invite: accept });
+    if (error) setSocialMessage(error.message);
+    else { if (accept) setPartyId(data as string); setSocialMessage(accept ? "Ya estás en el grupo 2v2." : "Invitación rechazada."); }
+    await refreshSocialData();
+    setSocialBusy(false);
+  };
+
+  const signInWithProvider = async () => {
     if (!supabase || authBusy) return;
     setAuthBusy(true);
     setAuthMessage("");
     try {
-      const { error } = await supabase.auth.signInWithOAuth({ provider, options: { redirectTo: supabaseRedirectUrl() } });
+      const { error } = await supabase.auth.signInWithOAuth({ provider: "google", options: { redirectTo: supabaseRedirectUrl() } });
       if (error) setAuthMessage(error.message);
     } catch (error) {
       setAuthMessage(error instanceof Error ? error.message : "No se pudo iniciar el acceso social.");
@@ -1684,6 +2090,10 @@ export default function App() {
   };
 
   const startMatch = (mode: GameMode) => {
+    if (!authSession && !localPreview) { setScreen("auth"); return; }
+    setOnlineMatch(null);
+    setOnlineSubmittedBids({});
+    setOnlineRoomReady(false);
     const activeProfile = profileRef.current;
     if (activeProfile.coins < MATCH_ENTRY_FEE) return;
     matchEventsRef.current = getActiveEvents(new Date());
@@ -1725,6 +2135,151 @@ export default function App() {
     setPanel(null);
     commitProfile(advanceMission({ ...activeProfile, coins: activeProfile.coins - MATCH_ENTRY_FEE }, "games"));
     playSfx("deal");
+  };
+
+  const receiveOnlineMatch = (setup: OnlineMatchSetup) => {
+    if (!authSession || !setup.roster.some((member) => member.id === authSession?.user.id)) return;
+    if (onlineQueueChannelRef.current && supabase) { void supabase.removeChannel(onlineQueueChannelRef.current); onlineQueueChannelRef.current = null; }
+    setOnlineQueueMode(null);
+    setOnlineQueueMessage("");
+    setOnlineMatch(setup);
+    setOnlineRoomReady(false);
+    onlineResolvedRoundRef.current = 0;
+    setOnlineSubmittedBids({});
+    chatRoomId.current = setup.id;
+    setChatSessionId(crypto.randomUUID());
+    setChatConnection("online");
+    setChatMessages([]);
+    setChatDraft("");
+    setChatEmotesOpen(false);
+    setChatEmoteCategory("normales");
+    resolutionRunRef.current += 1;
+    setGameMode(setup.mode);
+    setRound(1);
+    setRoundRules(setup.rules);
+    const players = setup.players.map((player) => ({ ...player, isUser: player.id === authSession.user.id }));
+    setMatchPlayers(players);
+    const localPlayer = players.find((player) => player.isUser);
+    setHandValues(localPlayer?.hand ?? []);
+    setSelected(null);
+    setRemovalsUsedThisMatch(0);
+    setRemoveMode(false);
+    setBidPlaced(false);
+    setTurnSeconds(30);
+    setRevealedBids(null);
+    setRevealedLoot(false);
+    setResolutionStage("idle");
+    setResolutionWinnerIds([]);
+    setRoundScoreChanges([]);
+    setLootEffect(setup.lootEffect);
+    setLootValues(setup.lootValues);
+    setCarriedPot(0);
+    setResolutionMessage("");
+    setMatchResult(null);
+    setPage("game");
+    setScreen("game");
+    setPanel(null);
+    const current = profileRef.current;
+    if (current.coins >= MATCH_ENTRY_FEE) commitProfile(advanceMission({ ...current, coins: current.coins - MATCH_ENTRY_FEE }, "games"));
+    matchEventsRef.current = getActiveEvents(new Date());
+    playSfx("deal");
+  };
+
+  onlineMatchHandlerRef.current = receiveOnlineMatch;
+
+  onlineRoundAdvanceHandlerRef.current = (payload) => {
+    if (!authSession) return;
+    const players = (payload.players as MatchPlayer[]).map((player) => ({ ...player, isUser: player.id === authSession.user.id }));
+    setRound(payload.round);
+    setMatchPlayers(players);
+    setHandValues(players.find((player) => player.isUser)?.hand ?? []);
+    setRoundRules(payload.rules);
+    setSelected(null);
+    setRemoveMode(false);
+    setBidPlaced(false);
+    setRevealedBids(null);
+    setRevealedLoot(false);
+    setLootEffect(payload.lootEffect);
+    setLootValues(payload.lootValues);
+    setResolutionStage("idle");
+    setResolutionWinnerIds([]);
+    setRoundScoreChanges([]);
+    setResolutionMessage("");
+    setOnlineSubmittedBids({});
+    setTurnSeconds(30);
+    onlineResolvedRoundRef.current = payload.round - 1;
+    playSfx("deal");
+  };
+
+  const cancelOnlineQueue = () => {
+    if (onlineQueueChannelRef.current && supabase) void supabase.removeChannel(onlineQueueChannelRef.current);
+    onlineQueueChannelRef.current = null;
+    setOnlineQueueMode(null);
+    setOnlineQueueCount(1);
+    setOnlineQueueMessage("");
+  };
+
+  const joinOnlineQueue = (mode: GameMode) => {
+    if (!supabase || !authSession || !usernameChecked || profile.coins < MATCH_ENTRY_FEE) return;
+    setOnlineMatch(null);
+    cancelOnlineQueue();
+    setOnlineQueueMode(mode);
+    setOnlineQueueCount(1);
+    setOnlineQueueMessage("Conectando con la mesa online…");
+    const userId = authSession.user.id;
+    const expected = mode === "duel" ? 2 : 4;
+    let claimed = false;
+    const channel = supabase.channel("sigma:matchmaking", { config: { presence: { key: userId }, broadcast: { ack: true, self: false } } });
+    onlineQueueChannelRef.current = channel;
+    channel.on("broadcast", { event: "match-found" }, ({ payload }) => onlineMatchHandlerRef.current(payload as OnlineMatchSetup));
+    channel.on("presence", { event: "sync" }, () => {
+      const candidates = Object.entries(channel.presenceState()).flatMap(([key, metas]) => metas.map((meta: any) => ({ ...meta, user_id: meta.user_id || key })))
+        .filter((entry: any) => entry.mode === mode && entry.user_id && entry.username)
+        .sort((a: any, b: any) => Number(a.joined_at) - Number(b.joined_at));
+      setOnlineQueueCount(candidates.length);
+      setOnlineQueueMessage(`Buscando jugadores… ${Math.min(candidates.length, expected)}/${expected}`);
+      if (claimed || candidates.length < expected) return;
+
+      let groups: any[][];
+      if (mode === "teams") {
+        const grouped = new Map<string, any[]>();
+        const solo: any[][] = [];
+        for (const candidate of candidates) {
+          if (!candidate.party_id) solo.push([candidate]);
+          else grouped.set(candidate.party_id, [...(grouped.get(candidate.party_id) ?? []), candidate]);
+        }
+        const completeParties = [...grouped.values()].filter((group) => group.length === 2)
+          .sort((a, b) => Number(a[0].joined_at) - Number(b[0].joined_at));
+        solo.sort((a, b) => Number(a[0].joined_at) - Number(b[0].joined_at));
+        // Keep each premade duo adjacent so the team split never separates partners.
+        groups = [...completeParties, ...solo];
+        const selected: any[][] = [];
+        let seats = 0;
+        for (const group of groups) { if (seats + group.length > expected) continue; selected.push(group); seats += group.length; if (seats === expected) break; }
+        groups = selected;
+      } else groups = candidates.map((candidate: any) => [candidate]);
+      const rosterEntries = groups.flat();
+      if (rosterEntries.length !== expected || rosterEntries[0]?.user_id !== userId) return;
+      claimed = true;
+      const roster: OnlineRosterPlayer[] = rosterEntries.map((entry: any, index: number) => ({
+        id: entry.user_id,
+        username: entry.username,
+        avatar: entry.avatar || "🐱",
+        deckIds: Array.isArray(entry.deck_ids) ? entry.deck_ids.slice(0, 3) : ["basica"],
+        ownedCards: Array.isArray(entry.owned_cards) ? entry.owned_cards : [],
+        team: mode === "teams" ? (Math.floor(index / 2) === 0 ? 1 : 2) : 0,
+      }));
+      const players: MatchPlayer[] = roster.map((member) => ({ id: member.id, name: member.username, avatar: member.avatar, score: 0, hand: dealHand(member.deckIds, 5, member.ownedCards), team: member.team, isUser: member.id === userId }));
+      const setup: OnlineMatchSetup = { id: crypto.randomUUID(), mode, hostId: userId, roster, players, rules: createRoundRules(modeRoundCount(mode)), lootValues: generateLootValues(), lootEffect: hiddenLootEffects[Math.floor(Math.random() * hiddenLootEffects.length)] };
+      void channel.send({ type: "broadcast", event: "match-found", payload: setup });
+      onlineMatchHandlerRef.current(setup);
+    });
+    channel.subscribe((status) => {
+      if (status === "SUBSCRIBED") {
+        setOnlineQueueMessage(`Buscando rivales para ${mode === "classic" ? "Clásico 4P" : mode === "teams" ? "Equipos 2v2" : "Duelo 1v1"}…`);
+        void channel.track({ user_id: userId, username: profile.name, avatar: profile.avatar, mode, party_id: mode === "teams" ? partyId : null, deck_ids: profile.equippedCards, owned_cards: profile.ownedCards, joined_at: Date.now() });
+      } else if (status === "CHANNEL_ERROR" || status === "TIMED_OUT") setOnlineQueueMessage("No se pudo conectar a la cola online. Comprueba tu conexión y vuelve a intentarlo.");
+    });
   };
 
   const removeHandCard = (index: number) => {
@@ -1793,11 +2348,13 @@ export default function App() {
     if (won) playSfx("handWin"); else playSfx("handLose");
   };
 
-  const placeBid = (chosenIndex = selected) => {
-    if (chosenIndex === null || bidPlaced || resolutionStage !== "idle" || !matchPlayers.length) return;
+  onlineFinishMatchRef.current = (players) => finishMatch(players);
+
+  const resolveRound = (chosenIndex = selected, bidIndexes: Record<string, number> = {}) => {
+    if (chosenIndex === null || (bidPlaced && !onlineMatch) || resolutionStage !== "idle" || !matchPlayers.length) return;
     const activeProfile = profileRef.current;
     const activeRule = activeRoundRule;
-    commitProfile(advanceMission(activeProfile, "bids"));
+    if (!onlineMatch) commitProfile(advanceMission(activeProfile, "bids"));
     const humanCard = handValues[chosenIndex] ?? handValues[0] ?? { value: 1, deckId: "basica" };
     const humanValue = humanCard.value;
     const knifePassive = hasActiveSet(activeProfile, "cuchillo");
@@ -1809,9 +2366,10 @@ export default function App() {
     const previousLastScore = Math.min(...playersForRound.map((player) => player.score));
     const passiveNotes: string[] = [];
     const plays = playersForRound.map((player, index) => {
-      const hand = index === 0 ? handValues : player.hand;
-      let cardIndex = index === 0 ? chosenIndex : 0;
-      if (index > 0) {
+      const hand = player.isUser ? handValues : player.hand;
+      let cardIndex = player.isUser ? chosenIndex : 0;
+      if (onlineMatch) cardIndex = bidIndexes[player.id] ?? cardIndex;
+      else if (!player.isUser) {
         const candidates = hand.map((card, cardPosition) => ({ card, cardPosition }));
         const evenCandidates = candidates.filter(({ card }) => card.value % 2 === 0);
         const ruleCandidates = activeRule.id === "even-bids" && evenCandidates.length ? evenCandidates : candidates;
@@ -1822,14 +2380,14 @@ export default function App() {
         }, ruleCandidates[0] ?? candidates[0]);
         cardIndex = chosen?.cardPosition ?? 0;
       }
-      const playedCard = index === 0 ? humanCard : hand[cardIndex] ?? { value: 1, deckId: "basica" };
-      const rawValue = index === 0 ? humanValue : playedCard.value;
+      const playedCard = player.isUser ? humanCard : hand[cardIndex] ?? { value: 1, deckId: "basica" };
+      const rawValue = player.isUser ? humanValue : playedCard.value;
       const isRival = gameMode !== "teams" || player.team !== playersForRound[0].team;
       let value = rawValue;
       if (playedCard.effectId === "bid-plus-one") value += 1;
-      if (index === 0 && ninjaPassive && rawValue <= 3) { value += 2; passiveNotes.push("Banda: +2 a tu puja baja"); }
-      if (index === 0 && toxicSetPassive && playedCard.deckId === "veneno" && rawValue >= 6) { value += 1; passiveNotes.push("Tóxicos: +1 a la puja"); }
-      if (index > 0 && knifePassive && isRival) value = Math.max(1, value - 1);
+      if (player.isUser && ninjaPassive && rawValue <= 3) { value += 2; passiveNotes.push("Banda: +2 a tu puja baja"); }
+      if (player.isUser && toxicSetPassive && playedCard.deckId === "veneno" && rawValue >= 6) { value += 1; passiveNotes.push("Tóxicos: +1 a la puja"); }
+      if (!player.isUser && knifePassive && isRival) value = Math.max(1, value - 1);
       player.hand.splice(cardIndex, 1);
       return { player, value, faceValue: rawValue, card: playedCard };
     });
@@ -1864,6 +2422,10 @@ export default function App() {
     }
     if (knifePassive && gameMode !== "duel") passiveNotes.push("Ladrones: −1 a las pujas rivales");
     setRevealedBids(plays.map((play) => ({ ...play.card, value: play.faceValue })));
+    if (onlineMatch && authSession) {
+      setBidPlaced(true);
+      void onlineGameChannelRef.current?.send({ type: "broadcast", event: "round-reveal", payload: { round, bids: plays.map((play) => ({ ...play.card, value: play.faceValue })) } });
+    }
 
     let winners: MatchPlayer[] = [];
     let message = "";
@@ -1979,30 +2541,42 @@ export default function App() {
     const sequence = ++resolutionRunRef.current;
     setResolutionStage("bids");
     setResolutionMessage("");
-    window.setTimeout(() => {
+    scheduleGameTimeout(() => {
       if (sequence !== resolutionRunRef.current) return;
       setResolutionStage("loot");
       setRevealedLoot(true);
       playSfx("flip");
-      window.setTimeout(() => {
+      if (onlineMatch && authSession?.user.id === onlineMatch.hostId) void onlineGameChannelRef.current?.send({ type: "broadcast", event: "loot-reveal", payload: { round, lootEffect: effect } });
+      scheduleGameTimeout(() => {
         if (sequence !== resolutionRunRef.current) return;
         setMatchPlayers(playersForRound);
-        setHandValues(plays[0].player.hand);
+        setHandValues(plays.find((play) => play.player.isUser)?.player.hand ?? []);
         setResolutionStage("result");
         setResolutionWinnerIds(winnerIdsForDisplay);
         setRoundScoreChanges(scoreChanges);
         setResolutionMessage(outcomeSummary);
+        if (onlineMatch && authSession?.user.id === onlineMatch.hostId) void onlineGameChannelRef.current?.send({ type: "broadcast", event: "round-result", payload: { round, players: playersForRound, winnerIds: winnerIdsForDisplay, scoreChanges, message: outcomeSummary } });
         if (winners.some((winner) => winner.isUser)) playSfx("handWin"); else if (winners.length) playSfx("handLose");
-        window.setTimeout(() => {
+        scheduleGameTimeout(() => {
           if (sequence !== resolutionRunRef.current) return;
           setResolutionMessage("");
           setResolutionStage("idle");
           const nextRound = round + 1;
           if (nextRound > maxRounds) {
+            if (onlineMatch && authSession?.user.id === onlineMatch.hostId) void onlineGameChannelRef.current?.send({ type: "broadcast", event: "match-finished", payload: { players: playersForRound } });
             finishMatch(playersForRound, roundCoinBonus);
             return;
           }
-          const dealt = playersForRound.map((player) => ({ ...player, hand: dealHand(player.isUser ? activeProfile.equippedCards : ["basica"], 5, player.isUser ? activeProfile.ownedCards : undefined) }));
+          if (onlineMatch && authSession?.user.id !== onlineMatch.hostId) return;
+          const dealt = playersForRound.map((player) => ({ ...player, hand: dealHand(onlineMatch ? (onlineMatch.roster.find((member) => member.id === player.id)?.deckIds ?? ["basica"]) : player.isUser ? activeProfile.equippedCards : ["basica"], 5, onlineMatch ? onlineMatch.roster.find((member) => member.id === player.id)?.ownedCards : player.isUser ? activeProfile.ownedCards : undefined) }));
+          const nextLootValues = generateLootValues();
+          const nextLootEffect = hiddenLootEffects[Math.floor(Math.random() * hiddenLootEffects.length)];
+          if (onlineMatch && authSession?.user.id === onlineMatch.hostId) {
+            const payload = { round: nextRound, players: dealt, rules: roundRules, lootValues: nextLootValues, lootEffect: nextLootEffect };
+            void onlineGameChannelRef.current?.send({ type: "broadcast", event: "round-next", payload });
+            onlineRoundAdvanceHandlerRef.current(payload);
+            return;
+          }
           setRound(nextRound);
           setMatchPlayers(dealt);
           setHandValues(dealt[0].hand);
@@ -2011,8 +2585,8 @@ export default function App() {
           setBidPlaced(false);
           setRevealedBids(null);
           setRevealedLoot(false);
-          setLootEffect(hiddenLootEffects[Math.floor(Math.random() * hiddenLootEffects.length)]);
-          setLootValues(generateLootValues());
+          setLootEffect(nextLootEffect);
+          setLootValues(nextLootValues);
           setTurnSeconds(30);
           setResolutionWinnerIds([]);
           setRoundScoreChanges([]);
@@ -2022,11 +2596,110 @@ export default function App() {
     }, 2000);
   };
 
+  const placeBid = (chosenIndex = selected) => {
+    if (chosenIndex === null || bidPlaced || resolutionStage !== "idle" || !matchPlayers.length) return;
+    if (!onlineMatch) { resolveRound(chosenIndex); return; }
+    if (!onlineRoomReady || !authSession || onlineSubmittedBids[authSession.user.id] !== undefined) return;
+    const submitted = { match_id: onlineMatch.id, round, player_id: authSession.user.id, card_index: chosenIndex };
+    setOnlineSubmittedBids((current) => ({ ...current, [authSession.user.id]: chosenIndex }));
+    setSelected(chosenIndex);
+    setBidPlaced(true);
+    commitProfile(advanceMission(profileRef.current, "bids"));
+    playSfx("confirm");
+    void onlineGameChannelRef.current?.send({ type: "broadcast", event: "bid", payload: submitted });
+  };
+
   useEffect(() => {
-    if (screen === "game" && page === "game" && turnSeconds === 0 && !bidPlaced) {
-      placeBid(selected ?? Math.floor(Math.random() * Math.max(1, handValues.length)));
+    if (!onlineMatch || !authSession || screen !== "game" || page !== "game" || resolutionStage !== "idle") return;
+    if (authSession.user.id !== onlineMatch.hostId || onlineResolvedRoundRef.current === round) return;
+    const bidIds = Object.keys(onlineSubmittedBids);
+    if (!onlineMatch.roster.every((player) => bidIds.includes(player.id))) return;
+    const ownIndex = onlineSubmittedBids[authSession.user.id];
+    if (ownIndex === undefined) return;
+    onlineResolvedRoundRef.current = round;
+    resolveRound(ownIndex, onlineSubmittedBids);
+  }, [onlineMatch?.id, authSession?.user.id, onlineSubmittedBids, screen, page, resolutionStage, round]);
+
+  useEffect(() => {
+    if (screen === "game" && page === "game" && resolutionStage === "idle" && turnSeconds === 0 && (!bidPlaced || Boolean(onlineMatch && authSession?.user.id === onlineMatch.hostId))) {
+      const chosen = selected ?? Math.floor(Math.random() * Math.max(1, handValues.length));
+      if (onlineMatch && authSession?.user.id === onlineMatch.hostId && onlineRoomReady) {
+        const completedBids = { ...onlineSubmittedBids };
+        const ownBidMissing = completedBids[authSession.user.id] === undefined;
+        if (ownBidMissing) {
+          completedBids[authSession.user.id] = chosen;
+          void onlineGameChannelRef.current?.send({ type: "broadcast", event: "bid", payload: { match_id: onlineMatch.id, round, player_id: authSession.user.id, card_index: chosen, automatic: true } });
+        }
+        for (const player of onlineMatch.roster) {
+          if (completedBids[player.id] !== undefined) continue;
+          const hand = matchPlayers.find((entry) => entry.id === player.id)?.hand ?? [];
+          const fallbackIndex = Math.floor(Math.random() * Math.max(1, hand.length));
+          completedBids[player.id] = fallbackIndex;
+          void onlineGameChannelRef.current?.send({ type: "broadcast", event: "bid", payload: { match_id: onlineMatch.id, round, player_id: player.id, card_index: fallbackIndex, automatic: true } });
+        }
+        if (!ownBidMissing && Object.keys(completedBids).length === Object.keys(onlineSubmittedBids).length) return;
+        setOnlineSubmittedBids(completedBids);
+        setSelected(chosen);
+        setBidPlaced(true);
+        if (ownBidMissing) commitProfile(advanceMission(profileRef.current, "bids"));
+      } else placeBid(chosen);
     }
-  }, [screen, page, turnSeconds, bidPlaced, selected]);
+  }, [screen, page, turnSeconds, bidPlaced, selected, onlineMatch?.id, onlineSubmittedBids, onlineRoomReady, matchPlayers, resolutionStage]);
+
+  if (!authBootComplete || (!authSession && !localPreview)) {
+    return (
+      <main className="game-shell start-screen auth-start-screen">
+        {fullscreenButton()}
+        {import.meta.env.DEV && <button type="button" className="local-preview-button" onClick={() => { const preview = readPlayerProfile("local-preview"); const next = { ...preview, name: "PruebaLocal", coins: Math.max(1000, preview.coins), gems: Math.max(1000, preview.gems) }; profileRef.current = next; setProfile(next); setProfileNameDraft(next.name); setLocalPreview(true); setAuthBootComplete(true); setUsernameChecked(true); setScreen("menu"); }}>ENTRAR EN MODO PRUEBA</button>}
+        <div className="ambient ambient-one" />
+        <div className="ambient ambient-two" />
+        <div className="menu-coin-spark spark-a">✦</div><div className="menu-coin-spark spark-b">✧</div>
+        <div className="menu-board-art auth-board-art" aria-hidden="true"><div className="menu-board-card card-one"><GeminiCardFace deckId="cuchillo" value={3} /></div><div className="menu-board-card card-two"><GeminiCardFace deckId="escudo" value={7} /></div><div className="menu-board-card card-three"><GeminiCardFace deckId="dorado" value={5} /></div><img className="menu-board-coin" src={publicAsset("sigma/ui/diamond.png")} alt="" /></div>
+        <section className="auth-menu-content">
+          <div className="game-logo-kicker">LA GRAN SUBASTA:</div>
+          <h1 className="game-logo">EL <span>BOTÍN</span></h1>
+          <p className="menu-tagline">Inicia sesión o crea tu cuenta para entrar en la subasta.</p>
+          <section className="account-panel auth-entry-card" aria-labelledby="account-entry-title">
+            <div className="account-panel-heading"><span><small>BIENVENIDO A LA MESA</small><strong id="account-entry-title">{authMode === "login" ? "INICIAR SESIÓN" : "CREAR CUENTA"}</strong></span></div>
+            <div className="account-auth-tabs"><button type="button" className={authMode === "login" ? "active" : ""} onClick={() => { setAuthMode("login"); setAuthMessage(""); }}>INICIAR SESIÓN</button><button type="button" className={authMode === "register" ? "active" : ""} onClick={() => { setAuthMode("register"); setAuthMessage(""); }}>CREAR CUENTA</button></div>
+            <form className="account-auth-form" onSubmit={(event) => { event.preventDefault(); void submitEmailAuth(); }}>
+              <label htmlFor="entry-email">CORREO ELECTRÓNICO</label><input id="entry-email" type="email" autoComplete="email" required maxLength={254} value={authEmail} onChange={(event) => setAuthEmail(event.target.value)} placeholder="tu@correo.com" />
+              <label htmlFor="entry-password">CONTRASEÑA</label><input id="entry-password" type="password" autoComplete={authMode === "register" ? "new-password" : "current-password"} required minLength={8} value={authPassword} onChange={(event) => setAuthPassword(event.target.value)} placeholder="Mínimo 8 caracteres" />
+              <button className="account-submit" type="submit" disabled={authBusy || !supabaseConfigured}>{authBusy ? "CONECTANDO…" : authMode === "register" ? "CREAR CUENTA CON CORREO" : "ENTRAR CON CORREO"}</button>
+            </form>
+            <div className="account-provider-divider"><span>o continúa con</span></div>
+            <div className="account-provider-buttons"><button type="button" onClick={() => void signInWithProvider()} disabled={authBusy || !supabaseConfigured}><b>G</b> Continuar con Google</button></div>
+            {!supabaseConfigured && <p className="account-feedback" role="status">La conexión de acceso no está configurada en esta versión.</p>}
+            {authMessage && <p className="account-feedback" role="status">{authMessage}</p>}
+            <small className="account-privacy-note">Tu contraseña la gestiona Supabase Auth; nunca se guarda en el juego.</small>
+          </section>
+        </section>
+      </main>
+    );
+  }
+
+  if (!localPreview && (!usernameChecked || usernameRequired)) {
+    return (
+      <main className="game-shell start-screen auth-start-screen">
+        {fullscreenButton()}
+        <div className="ambient ambient-one" /><div className="ambient ambient-two" />
+        <div className="menu-board-art auth-board-art" aria-hidden="true"><div className="menu-board-card card-one"><GeminiCardFace deckId="cuchillo" value={3} /></div><div className="menu-board-card card-two"><GeminiCardFace deckId="escudo" value={7} /></div><div className="menu-board-card card-three"><GeminiCardFace deckId="dorado" value={5} /></div></div>
+        <section className="auth-menu-content username-onboarding">
+          <div className="game-logo-kicker">LA GRAN SUBASTA:</div><h1 className="game-logo">EL <span>BOTÍN</span></h1>
+          <p className="menu-tagline">Elige tu nick para que los demás te encuentren en la mesa.</p>
+          <section className="account-panel auth-entry-card" aria-labelledby="username-title">
+            <div className="account-panel-heading"><span><small>IDENTIDAD DE JUGADOR</small><strong id="username-title">TU NOMBRE DE USUARIO</strong></span></div>
+            <label className="username-label" htmlFor="player-username">NICK · 5–16 CARACTERES</label>
+            <input id="player-username" className="username-input" autoComplete="nickname" maxLength={16} value={usernameDraft} onChange={(event) => { setUsernameDraft(event.target.value.replace(/[^A-Za-z0-9]/g, "")); setUsernameChecked(false); setUsernameMessage(""); }} placeholder="Ejemplo: Capitan123" />
+            <small className="username-rules">Solo letras y números, sin espacios ni símbolos. Debe ser único.</small>
+            <div className="username-actions"><button type="button" onClick={() => void checkUsernameAvailability()} disabled={socialBusy || !supabaseConfigured}>COMPROBAR NICK</button><button type="button" className="username-next" onClick={() => void saveUsername()} disabled={socialBusy || !usernameChecked}>SIGUIENTE ›</button></div>
+            {usernameMessage && <p className={`account-feedback ${usernameMessage.includes("disponible") ? "success" : "error"}`} role="status">{usernameMessage}</p>}
+            {!supabaseConfigured && <p className="account-feedback error">El servicio de perfiles no está configurado.</p>}
+          </section>
+        </section>
+      </main>
+    );
+  }
 
   if (screen !== "game" && page === "game") {
     const modeTitles: Record<GameMode, string> = { classic: "4P CLÁSICO", teams: "EQUIPOS 2v2", duel: "DUELO 1v1" };
@@ -2040,7 +2713,7 @@ export default function App() {
       .slice(0, 50);
     const nameCooldownMs = 30 * 24 * 60 * 60 * 1000;
     const nameCooldownLeft = Math.max(0, nameCooldownMs - (Date.now() - profile.lastNameChange));
-    const canChangeName = nameCooldownLeft === 0 && profileNameDraft.trim().length >= 3 && profileNameDraft.trim() !== profile.name && profile.gems >= NAME_CHANGE_GEMS;
+    const canChangeName = nameCooldownLeft === 0 && /^[A-Za-z0-9]{5,16}$/.test(profileNameDraft.trim()) && profileNameDraft.trim() !== profile.name && profile.gems >= NAME_CHANGE_GEMS;
     const rouletteCooldown = profile.lastSpinTime ? Math.max(0, 24 * 60 * 60 * 1000 - (rouletteNow - profile.lastSpinTime)) : 0;
     const rouletteReady = rouletteCooldown === 0;
     const rouletteTimeLabel = `${Math.floor(rouletteCooldown / 3_600_000)}h ${Math.floor((rouletteCooldown % 3_600_000) / 60_000)}m`;
@@ -2051,11 +2724,13 @@ export default function App() {
       playSfx("click");
       setHomeUtilityPanel(null);
       if (next === "settings") setSettingsReturn(screen);
+      if (next === "social") { setSocialMessage(""); void refreshSocialData(); void refreshRandomPlayers(); }
       setScreen(next);
     };
 
     return (
       <main className={`game-shell start-screen ${screen !== "menu" ? "subscreen" : ""}`}>
+        {fullscreenButton()}
         <div className="ambient ambient-one" />
         <div className="ambient ambient-two" />
         <div className="menu-coin-spark spark-a">✦</div><div className="menu-coin-spark spark-b">✧</div>
@@ -2074,9 +2749,10 @@ export default function App() {
             <div className="game-logo-kicker">LA GRAN SUBASTA:</div>
             <h1 className="game-logo">EL <span>BOTÍN</span></h1>
             <p className="menu-tagline">La mesa está lista. ¿Te atreves a pujar?</p>
-            <button className="play-now-button" onClick={() => { playSfx("click"); setScreen("modes"); }}>
-              <span className="play-icon">▶</span><span><strong>¡JUGAR AHORA!</strong><small>ENTRA EN LA SUBASTA</small></span><b>›</b>
-            </button>
+            <div className="play-mode-actions">
+              <button className="play-now-button play-offline-button" onClick={() => { playSfx("click"); setScreen("modes"); }}><span className="play-icon">▶</span><span><strong>JUGAR OFFLINE</strong><small>CON RIVALES IA</small></span><b>›</b></button>
+              <button className="play-now-button play-online-button" disabled={localPreview} title={localPreview ? "El modo online requiere una cuenta" : undefined} onClick={() => { playSfx("click"); setOnlineQueueMessage(""); setScreen("online-modes"); }}><span className="play-icon">🌐</span><span><strong>JUGAR ONLINE</strong><small>{localPreview ? "REQUIERE CUENTA" : "BUSCAR JUGADORES"}</small></span><b>›</b></button>
+            </div>
             <div className="menu-shortcuts main-menu-shortcuts">
               <button onClick={() => goTo("season-ranking")}><img className="menu-option-icon rank-shortcut-icon" src={rankBadgeUrl("badge_gold_01.png")} alt="" /><span>RANKING DE RANGOS</span></button>
               <button onClick={() => goTo("ranking")}><img className="menu-option-icon" src={publicAsset("sigma/ui/trophy.png")} alt="" /><span>RANKING VICTORIAS</span></button>
@@ -2089,6 +2765,7 @@ export default function App() {
           </section>
           <button className="rules-info-button" onClick={() => { playSfx("click"); setRulesOpen(true); }} aria-label="Cómo se juega"><span>i</span><strong>¿CÓMO SE JUEGA?</strong></button>
           <nav className="home-quick-rail" aria-label="Accesos de temporada">
+            <button className="home-quick-button friends-quick-button" disabled={localPreview} title={localPreview ? "Los amigos requieren una cuenta" : undefined} onClick={() => goTo("social")} aria-label="Amigos y grupos"><span className="home-quick-icon">👥</span><strong>AMIGOS</strong><i>{friendProfiles.length}</i></button>
             <button className={`home-quick-button event-quick-button ${homeUtilityPanel === "events" ? "active" : ""}`} onClick={() => { playSfx("click"); setHomeUtilityPanel((open) => open === "events" ? null : "events"); }} aria-expanded={homeUtilityPanel === "events"} aria-label="Ver eventos activos"><span className="home-quick-icon">🎉</span><strong>EVENTOS</strong><i>{activeMenuEvents.length}</i></button>
             <button className={`home-quick-button chest-quick-button ${homeUtilityPanel === "chests" ? "active" : ""}`} onClick={() => { playSfx("click"); setHomeUtilityPanel((open) => open === "chests" ? null : "chests"); }} aria-expanded={homeUtilityPanel === "chests"} aria-label={`Ver cofres, ${profile.chests.length} de ${MAX_CHESTS}`}><span className="home-quick-icon"><GameIcon name="chest" size={29} /></span><strong>COFRES</strong><i>{profile.chests.length}/{MAX_CHESTS}</i></button>
           </nav>
@@ -2097,7 +2774,41 @@ export default function App() {
             {homeUtilityPanel === "events" ? <><div className="home-event-list">{activeMenuEvents.map((event) => { const hours = Math.max(1, Math.ceil((event.endsAt - serviceNow) / 3_600_000)); return <button className="home-event-card" key={event.id} onClick={() => { playSfx("click"); setHomeUtilityPanel(null); setScreen("modes"); }}><span className="home-event-icon">{event.icon}</span><span className="home-event-copy"><small>{event.period} · {hours < 24 ? `${hours} H` : `${Math.ceil(hours / 24)} D`}</small><strong>{event.title}</strong><em>{event.description}</em></span><b className="home-event-reward">{event.rewardText}</b></button>; })}</div><small className="home-utility-footnote">Los eventos se renuevan automáticamente y sus bonus se aplican al ganar.</small></> : <><header className="home-chest-panel-subheader"><span>ESPACIO DE COFRES</span><b>{profile.chests.length}/{MAX_CHESTS}</b></header>{profile.chests.length ? <div className="home-chest-list">{profile.chests.map((chest, index) => { const ready = serviceNow >= chest.readyAt; return <article className={`home-chest-card ${ready ? "ready" : "waiting"}`} key={chest.id}><GameIcon name="chest" size={32} /><span><strong>COFRE {index + 1}</strong><small>{ready ? "LISTO PARA ABRIR" : `EN ${formatCountdown(chest.readyAt - serviceNow)}`}</small></span><button disabled={!ready && profile.gems < CHEST_SKIP_GEMS} onClick={() => openChest(chest.id, !ready)}>{ready ? "ABRIR" : profile.gems >= CHEST_SKIP_GEMS ? `ABRIR · ${CHEST_SKIP_GEMS} 💎` : "ESPERAR"}</button></article>; })}</div> : <div className="home-chest-empty"><GameIcon name="chest" size={36} /><span>Completa una partida para conseguir tu primer cofre.</span></div>}{chestNotice && <p className="home-chest-notice" role="status">{chestNotice}</p>}<small className="home-utility-footnote">Apertura gratis tras 10 min · instantánea: {CHEST_SKIP_GEMS} 💎 · 15 💎: 5% · 30 💎: 2% · 60 💎: 0,5% · cosmético raro: 0,1%</small></>}
           </aside>}
           {rulesOpen && <div className="rules-modal-backdrop" onClick={() => setRulesOpen(false)}><section className="rules-modal" role="dialog" aria-modal="true" aria-labelledby="rules-modal-title" onClick={(event) => event.stopPropagation()}><button className="rules-modal-close" onClick={() => setRulesOpen(false)} aria-label="Cerrar reglas">×</button><span className="menu-section-kicker">GUÍA DE LA SUBASTA</span><h2 id="rules-modal-title">CÓMO SE JUEGA</h2><p className="rules-modal-intro">Elige bien cuándo gastar tus cartas: cada ronda cambia el criterio para ganar.</p><div className="rules-mode-grid"><article><strong>CLÁSICO 4P</strong><span>10 rondas · 4 jugadores</span></article><article><strong>EQUIPOS 2v2</strong><span>8 rondas · suma de pujas por equipo</span></article><article><strong>DUELO 1v1</strong><span>5 rondas · cara a cara</span></article></div><ol className="rules-modal-steps"><li><b>1</b><span>Al entrar pagas una entrada de {MATCH_ENTRY_FEE} monedas y recibes una mano de 5 cartas.</span></li><li><b>2</b><span>Tienes 30 segundos para elegir una carta. La regla de la ronda aparece antes de pujar: puede ganar la puja más alta, la más baja, la más cercana al 5 o la carta par más alta.</span></li><li><b>3</b><span>Todos revelan a la vez. La carta jugada se consume y las pasivas individuales y de set se aplican según su descripción.</span></li><li><b>4</b><span>El ganador recibe el botín central. Si hay empate, se divide en puntos enteros y el sobrante va a la banca. La carta sorpresa puede cambiar el valor del botín o aplicar un efecto.</span></li><li><b>5</b><span>Al terminar la partida recibes monedas según el modo y el resultado. Solo quien gana obtiene un cofre; puede abrirse tras 10 minutos o al instante por 25 gemas.</span></li></ol><button className="play-now-button rules-modal-action" onClick={() => setRulesOpen(false)}>¡ENTENDIDO!</button></section></div>}
-        </> : screen === "modes" ? (
+        </> : screen === "online-modes" ? (
+          <section className="menu-subpanel modes-panel online-modes-panel">
+            <button className="menu-back-link" onClick={() => { cancelOnlineQueue(); goTo("menu"); }}>‹ VOLVER AL MENÚ</button>
+            <span className="menu-section-kicker">MESA MULTIJUGADOR · EN DIRECTO</span><h1>JUGAR ONLINE</h1>
+            <p className="entry-fee-note">Emparejamiento en tiempo real · entrada: <strong>{MATCH_ENTRY_FEE} monedas</strong> · saldo: {profile.coins} 🪙</p>
+            {partyId && <div className="online-party-summary"><span>🤝</span><div><strong>GRUPO 2v2 · {partyProfiles.length}/2</strong><small>{partyProfiles.map((member) => member.username).join(" + ")}</small></div><button onClick={() => goTo("social")}>GESTIONAR</button></div>}
+            <div className="mode-choice-list">
+              <button className="mode-choice classic-mode" disabled={profile.coins < MATCH_ENTRY_FEE || Boolean(onlineQueueMode)} onClick={() => joinOnlineQueue("classic")}><span className="mode-choice-icon">⚔️</span><span><b>CLÁSICO 4P · ONLINE</b><small>10 rondas · busca 3 jugadores reales</small></span><i>›</i></button>
+              <button className="mode-choice teams-mode" disabled={profile.coins < MATCH_ENTRY_FEE || Boolean(onlineQueueMode)} onClick={() => joinOnlineQueue("teams")}><span className="mode-choice-icon">🤝</span><span><b>EQUIPOS 2v2 · ONLINE</b><small>8 rondas · juega en grupo o busca un equipo</small></span><i>›</i></button>
+              <button className="mode-choice duel-mode" disabled={profile.coins < MATCH_ENTRY_FEE || Boolean(onlineQueueMode)} onClick={() => joinOnlineQueue("duel")}><span className="mode-choice-icon">🔥</span><span><b>DUELO 1v1 · ONLINE</b><small>5 rondas rápidas · busca un rival real</small></span><i>›</i></button>
+            </div>
+            {onlineQueueMode && <div className="online-search-card" role="status"><span className="online-search-orbit">◉</span><div><strong>{onlineQueueMessage || "Buscando jugadores…"}</strong><small>En la cola: {onlineQueueCount} · necesarios: {onlineQueueMode === "duel" ? 2 : 4}</small></div><button onClick={cancelOnlineQueue}>CANCELAR</button></div>}
+            <button className="social-inline-link" onClick={() => goTo("social")}>AMIGOS Y GRUPOS 2v2 <b>›</b></button>
+          </section>
+        ) : screen === "social" ? (
+          <section className="menu-subpanel social-panel">
+            <button className="menu-back-link" onClick={() => goTo("menu")}>‹ VOLVER AL MENÚ</button>
+            <span className="menu-section-kicker">JUEGA CON TU GENTE</span><h1>AMIGOS Y GRUPOS</h1>
+            <div className="social-columns">
+              <section className="social-list-section"><header><strong>AMIGOS</strong><small>{friendProfiles.length} amigos · {friendProfiles.filter((friend) => onlineUserIds.includes(friend.id)).length} online</small></header>
+                {friendships.filter((edge) => edge.status === "pending" && edge.addressee_id === authSession?.user.id).map((edge) => { const sender = pendingFriendProfiles.find((player) => player.id === edge.requester_id); return <article className="social-player-row" key={`request-${edge.requester_id}`}><span className="social-player-avatar"><AvatarFace avatar={sender?.avatar_id ?? "🐱"} /></span><span><strong>{sender?.username ?? "Solicitud recibida"}</strong><small>QUIERE AÑADIRTE</small></span><button onClick={() => void acceptFriendRequest(edge.requester_id)} disabled={socialBusy}>ACEPTAR</button></article>; })}
+                {friendProfiles.length ? friendProfiles.map((friend) => <article className="social-player-row" key={friend.id}><span className="social-player-avatar"><AvatarFace avatar={friend.avatar_id} /></span><span><strong>{friend.username}</strong><small><i className={onlineUserIds.includes(friend.id) ? "presence-dot online" : "presence-dot"} />{onlineUserIds.includes(friend.id) ? "EN LÍNEA" : "DESCONECTADO"}</small></span>{partyId && partyProfiles.length < 2 && <button onClick={() => void inviteFriendToParty(friend.id)} disabled={socialBusy}>INVITAR 2v2</button>}<button className="social-remove" onClick={() => void removeFriend(friend.id)} disabled={socialBusy} aria-label={`Eliminar a ${friend.username}`}>×</button></article>) : <p className="social-empty">Todavía no tienes amigos. Descubre jugadores y envíales una solicitud.</p>}
+              </section>
+              <section className="social-list-section"><header><strong>DESCUBRIR JUGADORES</strong><button className="social-refresh-button" onClick={() => void refreshRandomPlayers()} disabled={socialBusy}>↻ ACTUALIZAR</button></header>
+                {socialProfiles.map((candidate) => <article className="social-player-row" key={candidate.id}><span className="social-player-avatar"><AvatarFace avatar={candidate.avatar_id} /></span><span><strong>{candidate.username}</strong><small><i className={onlineUserIds.includes(candidate.id) ? "presence-dot online" : "presence-dot"} />{onlineUserIds.includes(candidate.id) ? "EN LÍNEA" : "JUGADOR"}</small></span><button onClick={() => void sendFriendRequest(candidate.id)} disabled={socialBusy}>AÑADIR</button></article>)}
+                {!socialProfiles.length && <p className="social-empty">Pulsa actualizar para descubrir jugadores.</p>}
+              </section>
+            </div>
+            <section className="party-lobby-card"><header><span><small>EQUIPOS 2v2</small><strong>{partyId ? `TU GRUPO · ${partyProfiles.length}/2` : "CREA UN GRUPO DE DOS"}</strong></span>{!partyId && <button onClick={() => void createGameParty()} disabled={socialBusy}>CREAR GRUPO</button>}</header>
+              {partyId ? <><div className="party-member-list">{partyProfiles.map((member) => <span key={member.id}><AvatarFace avatar={member.avatar_id} />{member.id === authSession?.user.id ? "TÚ" : member.username}</span>)}</div><button className="party-ready-button" disabled={partyProfiles.length < 2} onClick={() => setScreen("online-modes")}>{partyProfiles.length < 2 ? "INVITA A UN AMIGO PARA CONTINUAR" : "BUSCAR PARTIDA 2v2 ›"}</button><p>Para entrar juntos, ambos miembros deben ponerse en cola en Equipos 2v2.</p></> : <p>Invita a un amigo desde la lista para entrar juntos a una partida online 2v2.</p>}
+            </section>
+            {partyInvites.filter((invite) => invite.invitee_id === authSession?.user.id).map((invite) => <div className="party-invite-row" key={invite.id}><span>Invitación de grupo 2v2 recibida</span><button onClick={() => void answerPartyInvite(invite.id, true)} disabled={socialBusy}>ACEPTAR</button><button onClick={() => void answerPartyInvite(invite.id, false)} disabled={socialBusy}>RECHAZAR</button></div>)}
+            {socialMessage && <p className="account-feedback" role="status">{socialMessage}</p>}
+          </section>
+        ) : screen === "modes" ? (
           <section className="menu-subpanel modes-panel">
             <button className="menu-back-link" onClick={() => goTo("menu")}>‹ VOLVER AL MENÚ</button>
             <span className="menu-section-kicker">ELIGE CÓMO JUGAR</span><h1>MODOS DE JUEGO</h1>
@@ -2138,32 +2849,22 @@ export default function App() {
             {screen === "profile" && <>
               <span className="menu-section-kicker">TU HISTORIA EN LA MESA</span><h1>MI PERFIL</h1>
               <div className="profile-hero"><div className={`menu-avatar-frame large ${avatarFrameClass(profile.equippedFrame)}`} style={{ "--avatar-fill": profile.equippedAvatarColor } as React.CSSProperties}><AvatarFace avatar={profile.avatar} /></div><div><small>CAPITÁN</small><strong>{profile.name}</strong><span>Perfil y victorias</span></div></div>
-              <section className="account-panel" aria-labelledby="account-panel-title">
-                <div className="account-panel-heading"><span><small>CUENTA ONLINE</small><strong id="account-panel-title">{authSession ? "Cuenta vinculada" : "Guarda tu perfil"}</strong></span>{authSession && <button type="button" onClick={() => void signOutAccount()} disabled={authBusy}>CERRAR SESIÓN</button>}</div>
-                {!supabaseConfigured ? <p className="account-status">La conexión con Supabase aún no está configurada en este entorno. Añade la URL del proyecto y la clave pública para activar el registro.</p> : authSession ? <>
-                  <p className="account-status">Conectado como <strong>{authSession.user.email ?? "cuenta social"}</strong>. El perfil público se sincroniza con esta cuenta.</p>
-                  {authMessage && <p className="account-feedback">{authMessage}</p>}
-                </> : <>
-                  <div className="account-auth-tabs"><button type="button" className={authMode === "login" ? "active" : ""} onClick={() => { setAuthMode("login"); setAuthMessage(""); }}>INICIAR SESIÓN</button><button type="button" className={authMode === "register" ? "active" : ""} onClick={() => { setAuthMode("register"); setAuthMessage(""); }}>CREAR CUENTA</button></div>
-                  <form className="account-auth-form" onSubmit={(event) => { event.preventDefault(); void submitEmailAuth(); }}>
-                    <label htmlFor="account-email">CORREO ELECTRÓNICO</label><input id="account-email" type="email" autoComplete="email" required maxLength={254} value={authEmail} onChange={(event) => setAuthEmail(event.target.value)} placeholder="tu@correo.com" />
-                    <label htmlFor="account-password">CONTRASEÑA</label><input id="account-password" type="password" autoComplete={authMode === "register" ? "new-password" : "current-password"} required minLength={8} value={authPassword} onChange={(event) => setAuthPassword(event.target.value)} placeholder="Mínimo 8 caracteres" />
-                    <button className="account-submit" type="submit" disabled={authBusy}>{authBusy ? "CONECTANDO…" : authMode === "register" ? "CREAR CUENTA CON CORREO" : "ENTRAR CON CORREO"}</button>
-                  </form>
-                  <div className="account-provider-divider"><span>o continúa con</span></div>
-                  <div className="account-provider-buttons"><button type="button" onClick={() => void signInWithProvider("google")} disabled={authBusy}><b>G</b> Google</button><button type="button" onClick={() => void signInWithProvider("facebook")} disabled={authBusy}><b>f</b> Facebook</button></div>
-                  {authMessage && <p className="account-feedback" role="status">{authMessage}</p>}
-                  <small className="account-privacy-note">Tu contraseña la gestiona Supabase Auth; nunca se guarda en el juego.</small>
-                </>}
-              </section>
+              {localPreview ? <section className="account-panel"><div className="account-panel-heading"><span><small>MODO PRUEBA LOCAL</small><strong>Sin cuenta vinculada</strong></span><button type="button" onClick={() => { setLocalPreview(false); setScreen("auth"); }}>VOLVER AL ACCESO</button></div><p className="account-status">Tus pruebas se guardan solo en este navegador. El modo online requiere una cuenta.</p></section> : <section className="account-panel" aria-labelledby="account-panel-title">
+                <div className="account-panel-heading"><span><small>CUENTA ONLINE</small><strong id="account-panel-title">Cuenta vinculada</strong></span><button type="button" onClick={() => void signOutAccount()} disabled={authBusy}>{authBusy ? "CERRANDO…" : "CERRAR SESIÓN"}</button></div>
+                <p className="account-status">Conectado como <strong>{authSession?.user.email ?? "cuenta Google"}</strong>. El perfil público se sincroniza con esta cuenta.</p>
+                {authMessage && <p className="account-feedback" role="status">{authMessage}</p>}
+              </section>}
               <div className="profile-season-ranks"><span className="menu-section-kicker">TUS RANGOS · TEMPORADA ACTUAL</span>{(["classic", "teams", "duel"] as GameMode[]).map((mode) => { const wins = profile.winsByPeriod.monthly[mode].player ?? 0; const rank = rankForWins(wins); return <div className="profile-season-rank" key={mode}><img src={rankBadgeUrl(rank.asset)} alt="" /><span><small>{modeTitles[mode]}</small><strong>{rank.name}</strong><em>{wins} victorias este mes</em><em>{rank.next === Infinity ? "Rango máximo" : `Faltan ${Math.max(0, rank.next - wins)} para ${rank.nextName}`}</em><em>+{rank.coins} 🪙 · +{rank.gems} 💎 al cierre</em></span></div>; })}</div>
-              <div className="profile-name-edit"><label htmlFor="captain-name">NOMBRE DEL CAPITÁN</label><div><input id="captain-name" maxLength={12} value={profileNameDraft} onChange={(event) => setProfileNameDraft(event.target.value)} /><button disabled={!canChangeName} onClick={() => {
+              <div className="profile-name-edit"><label htmlFor="captain-name">NOMBRE DE USUARIO</label><div><input id="captain-name" maxLength={16} value={profileNameDraft} onChange={(event) => setProfileNameDraft(event.target.value.replace(/[^A-Za-z0-9]/g, ""))} /><button disabled={!canChangeName || socialBusy} onClick={async () => {
                 const nextName = profileNameDraft.trim();
                 if (nameCooldownLeft > 0) { setProfileMessage(`Podrás cambiarlo de nuevo en ${Math.ceil(nameCooldownLeft / (24 * 60 * 60 * 1000))} días.`); return; }
-                if (nextName.length < 3 || nextName === profile.name || profile.gems < NAME_CHANGE_GEMS) return;
+                if (!/^[A-Za-z0-9]{5,16}$/.test(nextName) || nextName === profile.name || profile.gems < NAME_CHANGE_GEMS || !supabase) return;
+                setSocialBusy(true);
+                const { data, error } = await supabase.rpc("claim_username", { requested_username: nextName });
+                if (error || data !== "ok") { setProfileMessage(data === "taken" ? "Este nick ya existe. Prueba con otro." : error?.message ?? "No se pudo actualizar el nick."); setSocialBusy(false); return; }
                 commitProfile({ ...profile, name: nextName, gems: profile.gems - NAME_CHANGE_GEMS, lastNameChange: Date.now() });
-                setProfileMessage(`Nombre actualizado. Coste: ${NAME_CHANGE_GEMS} gemas.`); playSfx("handWin");
-              }}>CAMBIAR · {NAME_CHANGE_GEMS} 💎</button></div><small>{nameCooldownLeft > 0 ? `Cambio disponible en ${Math.ceil(nameCooldownLeft / (24 * 60 * 60 * 1000))} días.` : "El cambio se puede hacer una vez cada 30 días."}</small>{profileMessage && <small className="profile-feedback">{profileMessage}</small>}</div>
+                setProfileMessage(`Nombre actualizado. Coste: ${NAME_CHANGE_GEMS} gemas.`); setSocialBusy(false); playSfx("handWin");
+              }}>CAMBIAR · {NAME_CHANGE_GEMS} 💎</button></div><small>{nameCooldownLeft > 0 ? `Cambio disponible en ${Math.ceil(nameCooldownLeft / (24 * 60 * 60 * 1000))} días.` : "5–16 letras o números. El cambio se puede hacer una vez cada 30 días."}</small>{profileMessage && <small className="profile-feedback">{profileMessage}</small>}</div>
               <div className="profile-stats"><div><b>{profile.winsByMode.classic.player}</b><span>VICTORIAS 4P</span></div><div><b>{profile.winsByMode.teams.player}</b><span>VICTORIAS 2v2</span></div><div><b>{profile.winsByMode.duel.player}</b><span>VICTORIAS 1v1</span></div></div>
               <button className="profile-collection-link" onClick={() => { playSfx("click"); setPage("inventory"); }}>VER MI INVENTARIO <span>›</span></button>
             </>}
@@ -2182,7 +2883,8 @@ export default function App() {
               <div className="roulette-wheel-wrap"><span className="roulette-pointer" aria-hidden="true">▼</span><div className={`roulette-wheel ${rouletteSpinning ? "spinning" : ""}`} style={{ transform: `rotate(${rouletteRotation}deg)` }} aria-label="Ruleta con premios de monedas y gemas">
                 {roulettePrizes.map((prize, index) => {
                   const angle = index * 30 + 15;
-                  return <span key={prize.label} title={`${(prize.weight / roulettePrizes.reduce((sum, item) => sum + item.weight, 0) * 100).toFixed(2)}% de probabilidad`} style={{ transform: `translate(-50%,-50%) rotate(${angle}deg) translateY(-${Math.min(145, Math.max(92, window.innerWidth * 0.11))}px) rotate(${-angle}deg)` }}>{prize.label}</span>;
+                  const wheelRadius = Math.min(145, Math.max(48, Math.min(window.innerWidth * 0.11, window.innerHeight * 0.18)));
+                  return <span key={prize.label} title={`${(prize.weight / roulettePrizes.reduce((sum, item) => sum + item.weight, 0) * 100).toFixed(2)}% de probabilidad`} style={{ transform: `translate(-50%,-50%) rotate(${angle}deg) translateY(-${wheelRadius}px) rotate(${-angle}deg)` }}>{prize.label}</span>;
                 })}<i>✦</i>
               </div></div>
               <p className="roulette-status">{rouletteResult || (rouletteReady ? "¡GIRO GRATIS DISPONIBLE!" : `Próximo giro gratis en ${rouletteTimeLabel}`)}</p>
@@ -2199,6 +2901,7 @@ export default function App() {
   if (page !== "game") {
     return (
       <main className="game-shell inventory-shell">
+        {fullscreenButton()}
         <div className="ambient ambient-one" />
         <div className="ambient ambient-two" />
         <InventoryPage
@@ -2279,8 +2982,9 @@ export default function App() {
         </section>
 
         <nav className="game-controls" aria-label="Controles del juego">
-          <button className="abandon-match-button" onClick={() => { resolutionRunRef.current += 1; setResolutionStage("idle"); setResolutionMessage(""); setPanel(null); setMatchResult(null); setPage("game"); setScreen("menu"); setTurnSeconds(30); playSfx("click"); }} aria-label="Abandonar partida">
-            ABANDONAR PARTIDA
+          {fullscreenButton("fullscreen-control")}
+          <button className="abandon-match-button" onClick={() => { resolutionRunRef.current += 1; setResolutionStage("idle"); setResolutionMessage(""); setPanel(null); setMatchResult(null); setOnlineMatch(null); setOnlineSubmittedBids({}); setPage("game"); setScreen("menu"); setTurnSeconds(30); playSfx("click"); }} aria-label="Abandonar partida">
+            <span className="abandon-full-label">ABANDONAR PARTIDA</span><span className="abandon-short-label">ABANDONAR</span>
           </button>
           <button
             onClick={() => { playSfx("click"); setPanel(panel === "settings" ? null : "settings"); }}
@@ -2370,7 +3074,7 @@ export default function App() {
               <div className="bid-slots">
                 {matchPlayers.map((player, index) => (
                   <div className={`bid-slot ${player.isUser ? "your-slot" : ""}`} key={player.id}>
-                    <span className={`bid-player-avatar ${player.isUser ? `you-dot user-bid-avatar ${avatarFrameClass(profile.equippedFrame)}` : ""}`} style={player.isUser ? { "--avatar-fill": profile.equippedAvatarColor } as React.CSSProperties : { background: gameMode === "teams" ? player.team === 1 ? "#2865a9" : "#a2364d" : "#43364e" }}>{player.isUser ? <AvatarFace avatar={profile.avatar} /> : player.avatar}</span>
+                    <span className={`bid-player-avatar ${player.isUser ? "you-dot user-bid-avatar" : ""}`} style={player.isUser ? { "--avatar-fill": profile.equippedAvatarColor } as React.CSSProperties : { background: gameMode === "teams" ? player.team === 1 ? "#2865a9" : "#a2364d" : "#43364e" }}>{player.isUser ? <AvatarFace avatar={profile.avatar} /> : player.avatar}</span>
                     <div key={`${animationKey}-${index}`} className={`tiny-card bid-${index + 1} ${revealedBids ? "is-revealed" : ""}`}>
                       {revealedBids ? <GeminiCardFace deckId={revealedBids[index]?.deckId ?? "basica"} value={revealedBids[index]?.value ?? 1} /> : <div className="tiny-card-back">?</div>}
                     </div>
@@ -2382,7 +3086,7 @@ export default function App() {
         </div>
       </section>
 
-      {matchResult && <div className="match-end-overlay"><section className="match-end-panel"><span className="menu-section-kicker">{gameMode === "teams" ? "EQUIPOS 2v2" : gameMode === "duel" ? "DUELO 1v1" : "CLÁSICO 4P"} · PARTIDA COMPLETADA</span><h2>{matchResult.title}</h2><p>{matchResult.winner}</p><div className="match-end-rows">{matchResult.rows.map((row, index) => <div key={`${row.name}-${index}`}><span>{index + 1}. {row.name}</span><strong>{Math.floor(row.score)} pts</strong></div>)}</div><div className="match-reward-line">RECOMPENSAS: +{matchResult.coinReward} 🪙 {matchResult.gemReward > 0 ? `· +${matchResult.gemReward} 💎` : ""}</div>{matchResult.eventBonus && <div className="match-event-reward">EVENTO APLICADO · {matchResult.eventBonus}</div>}<div className="match-chest-reward">{matchResult.chestAdded ? "🎁 ¡Has conseguido un cofre!" : matchResult.matchWon ? "🎁 Ya tienes 3 cofres guardados: abre uno para conseguir el siguiente." : "🎁 El cofre de partida es para quien gana."}</div><button className="play-now-button" onClick={() => { setMatchResult(null); setPage("game"); setScreen("modes"); }}>JUGAR OTRA PARTIDA <b>›</b></button><button className="menu-back-link" onClick={() => { setMatchResult(null); setPage("game"); setScreen("menu"); }}>VOLVER AL MENÚ</button></section></div>}
+      {matchResult && <div className="match-end-overlay"><section className="match-end-panel"><span className="menu-section-kicker">{gameMode === "teams" ? "EQUIPOS 2v2" : gameMode === "duel" ? "DUELO 1v1" : "CLÁSICO 4P"} · PARTIDA COMPLETADA</span><h2>{matchResult.title}</h2><p>{matchResult.winner}</p><div className="match-end-rows">{matchResult.rows.map((row, index) => <div key={`${row.name}-${index}`}><span>{index + 1}. {row.name}</span><strong>{Math.floor(row.score)} pts</strong></div>)}</div><div className="match-reward-line">RECOMPENSAS: +{matchResult.coinReward} 🪙 {matchResult.gemReward > 0 ? `· +${matchResult.gemReward} 💎` : ""}</div>{matchResult.eventBonus && <div className="match-event-reward">EVENTO APLICADO · {matchResult.eventBonus}</div>}<div className="match-chest-reward">{matchResult.chestAdded ? "🎁 ¡Has conseguido un cofre!" : matchResult.matchWon ? "🎁 Ya tienes 3 cofres guardados: abre uno para conseguir el siguiente." : "🎁 El cofre de partida es para quien gana."}</div><button className="play-now-button" onClick={() => { const online = Boolean(onlineMatch); setMatchResult(null); setOnlineMatch(null); setOnlineSubmittedBids({}); setPage("game"); setScreen(online ? "online-modes" : "modes"); }}>JUGAR OTRA PARTIDA <b>›</b></button><button className="menu-back-link" onClick={() => { setMatchResult(null); setOnlineMatch(null); setOnlineSubmittedBids({}); setPage("game"); setScreen("menu"); }}>VOLVER AL MENÚ</button></section></div>}
 
       <section className="hand-zone" aria-label="Tu mano">
         <div className="hand">
