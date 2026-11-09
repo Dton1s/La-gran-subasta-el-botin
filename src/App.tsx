@@ -331,6 +331,12 @@ const inventoryCards = cardCollections.flatMap((collection) => Array.from({ leng
 const hasDeckCard = (ownedCards: string[], deckId: string) => ownedCards.some((cardKey) => cardKey.startsWith(`${deckId}-`));
 const hasCompleteDeck = (ownedCards: string[], deckId: string) => Array.from({ length: 9 }, (_, index) => ownedCards.includes(`${deckId}-${index + 1}`)).every(Boolean);
 const hasActiveSet = (profile: PlayerProfile, deckId: string) => profile.equippedCards.includes(deckId) && hasCompleteDeck(profile.ownedCards, deckId);
+async function invokeGameAuthority(action: string, payload: Record<string, unknown> = {}) {
+  if (!supabase) throw new Error("La conexión de juego seguro no está disponible.");
+  const { data, error } = await supabase.functions.invoke("game-authority", { body: { action, ...payload } });
+  if (error) throw new Error((data as any)?.error || error.message || "No se pudo contactar con el servidor de juego.");
+  return data as any;
+}
 
 const publicAsset = (path: string) => `${import.meta.env.BASE_URL}${path.replace(/^\/+/, "")}`;
 const soundFiles = {
@@ -363,8 +369,8 @@ type MatchPlayer = { id: string; name: string; avatar: string; score: number; ha
 type OnlinePublicProfile = { id: string; username: string | null; display_name: string; avatar_id: string; avatar_color?: string; frame_id?: string };
 type OnlineFriendship = { requester_id: string; addressee_id: string; status: "pending" | "accepted" };
 type OnlinePartyInvite = { id: string; party_id: string; inviter_id: string; invitee_id: string; status: "pending" | "accepted" | "declined" };
-type OnlineRosterPlayer = { id: string; username: string; avatar: string; deckIds: string[]; ownedCards: string[]; team: 1 | 2 | 0 };
-type OnlineMatchSetup = { id: string; mode: GameMode; hostId: string; roster: OnlineRosterPlayer[]; players: MatchPlayer[]; rules: RoundRule[]; lootValues: number[]; lootEffect: LootEffect };
+type OnlineRosterPlayer = { id: string; username: string; avatar: string; team: 1 | 2 | 0 };
+type OnlineMatchSetup = { id: string; mode: GameMode; hostId: string; roster: OnlineRosterPlayer[]; isOnline?: boolean };
 type PausableGameTimeout = { callback: () => void; remainingMs: number; startedAt: number; timeoutId: number | null; start: () => void };
 type LootEffect = { type: string; label: string; value: number; icon: string; colors: [string, string]; description?: string };
 type PlayerMission = { id: string; desc: string; metric: string; period: "diaria" | "semanal" | "mensual"; difficulty: "FÁCIL" | "MEDIA" | "DIFÍCIL"; resetAt: number; target: number; progress: number; rewardAmt: number; rewardType: "coins" | "gems"; claimed: boolean };
@@ -1249,6 +1255,7 @@ export default function App() {
   const [accountWalletMessage, setAccountWalletMessage] = useState("");
   const accountWalletRefreshRef = useRef<() => Promise<void>>(async () => {});
   const walletMutationQueueRef = useRef<Promise<void>>(Promise.resolve());
+  const progressMutationQueueRef = useRef<Promise<void>>(Promise.resolve());
   const wallet = accountWallet ?? { coins: profile.coins, gems: profile.gems };
   const [profileNameDraft, setProfileNameDraft] = useState(profile.name);
   const [profileMessage, setProfileMessage] = useState("");
@@ -1278,18 +1285,24 @@ export default function App() {
   const [onlineQueueCount, setOnlineQueueCount] = useState(1);
   const [onlineQueueMessage, setOnlineQueueMessage] = useState("");
   const [onlineMatch, setOnlineMatch] = useState<OnlineMatchSetup | null>(null);
+  const [activeMatchId, setActiveMatchId] = useState<string | null>(null);
   const [onlineRoomReady, setOnlineRoomReady] = useState(false);
   const [onlineSubmittedBids, setOnlineSubmittedBids] = useState<Record<string, number>>({});
   const onlinePresenceRef = useRef<ReturnType<NonNullable<typeof supabase>["channel"]> | null>(null);
   const onlineQueueChannelRef = useRef<ReturnType<NonNullable<typeof supabase>["channel"]> | null>(null);
   const onlineGameChannelRef = useRef<ReturnType<NonNullable<typeof supabase>["channel"]> | null>(null);
   const onlineResolvedRoundRef = useRef(0);
+  const authoritativeAnimationRoundRef = useRef(0);
+  const authoritativeAnimationBusyRef = useRef(false);
+  const authoritativeMatchFinishedRef = useRef(false);
   const socialRefreshRef = useRef<() => Promise<void>>(async () => {});
   const onlineMatchHandlerRef = useRef<(setup: OnlineMatchSetup) => void>(() => {});
   const onlineRoundAdvanceHandlerRef = useRef<(payload: any) => void>(() => {});
   const onlineFinishMatchRef = useRef<(players: MatchPlayer[]) => void>(() => {});
   const [rankingMode, setRankingMode] = useState<GameMode>("classic");
   const [rankingPeriod, setRankingPeriod] = useState<RankingPeriod>("total");
+  const [globalRankingRows, setGlobalRankingRows] = useState<{ id: string; name: string; wins: number; color: string; avatar: string }[]>([]);
+  const [globalRankingLoading, setGlobalRankingLoading] = useState(false);
   const [missionTab, setMissionTab] = useState<PlayerMission["period"]>("diaria");
   const [bonusCoinsWon, setBonusCoinsWon] = useState(0);
   const [rouletteSpinning, setRouletteSpinning] = useState(false);
@@ -1304,6 +1317,46 @@ export default function App() {
   const [animationKey, setAnimationKey] = useState(0);
   const [panel, setPanel] = useState<"menu" | "settings" | null>(null);
   const [page, setPage] = useState<"game" | "inventory" | "shop">("game");
+
+  useEffect(() => {
+    if (!supabase || !authSession || (screen !== "ranking" && screen !== "season-ranking")) return;
+    let active = true;
+    setGlobalRankingLoading(true);
+    const now = new Date(serviceNow);
+    let periodStart = "1970-01-01";
+    if (rankingPeriod === "weekly" || screen === "season-ranking") {
+      const mondayOffset = (now.getUTCDay() + 6) % 7;
+      now.setUTCDate(now.getUTCDate() - mondayOffset);
+      if (screen === "season-ranking") now.setUTCDate(1);
+      else periodStart = now.toISOString().slice(0, 10);
+    }
+    if (rankingPeriod === "monthly" && screen !== "season-ranking") {
+      now.setUTCDate(1);
+      periodStart = now.toISOString().slice(0, 10);
+    }
+    void supabase.from("ranking_totals")
+      .select("user_id,wins,profiles(username,display_name,avatar_id,avatar_color)")
+      .eq("mode", rankingMode)
+      .eq("period", screen === "season-ranking" ? "monthly" : rankingPeriod)
+      .eq("period_start", screen === "season-ranking" ? now.toISOString().slice(0, 10) : periodStart)
+      .gt("wins", 0)
+      .order("wins", { ascending: false })
+      .limit(50)
+      .then(({ data, error }) => {
+        if (!active) return;
+        if (error) {
+          setGlobalRankingRows([]);
+          setAccountWalletMessage("No se pudo cargar el ranking global de Supabase.");
+        } else {
+          setGlobalRankingRows((data ?? []).map((row: any) => {
+            const publicProfile = Array.isArray(row.profiles) ? row.profiles[0] : row.profiles;
+            return { id: row.user_id, name: publicProfile?.username || publicProfile?.display_name || "Capitán", wins: Number(row.wins) || 0, color: publicProfile?.avatar_color || "#7454c7", avatar: publicProfile?.avatar_id || "🐱" };
+          }));
+        }
+        setGlobalRankingLoading(false);
+      });
+    return () => { active = false; };
+  }, [authSession?.user.id, screen, rankingMode, rankingPeriod, serviceNow]);
   const [chatOpen, setChatOpen] = useState(false);
   const [chatEmotesOpen, setChatEmotesOpen] = useState(false);
   const [chatDraft, setChatDraft] = useState("");
@@ -1472,50 +1525,11 @@ export default function App() {
 
   useEffect(() => {
     if (!supabase || !authSession || !onlineMatch) { setOnlineRoomReady(false); return; }
+    if (onlineMatch.isOnline === false) { setOnlineRoomReady(true); return; }
     const client = supabase;
     const ownId = authSession.user.id;
     const channel = client.channel(`sigma:match:${onlineMatch.id}`, { config: { broadcast: { ack: true, self: false } } });
     onlineGameChannelRef.current = channel;
-    channel.on("broadcast", { event: "bid" }, ({ payload }) => {
-      if (payload?.match_id !== onlineMatch.id || payload?.round !== activeRoundRef.current) return;
-      setOnlineSubmittedBids((current) => ({ ...current, [payload.player_id]: payload.card_index }));
-    });
-    channel.on("broadcast", { event: "round-reveal" }, ({ payload }) => {
-      if (payload?.round !== activeRoundRef.current) return;
-      setBidPlaced(true);
-      setSelected(null);
-      setRevealedBids(payload.bids);
-      setResolutionStage("bids");
-      setResolutionMessage("");
-      setAnimationKey((key) => key + 1);
-      playSfx("flip");
-    });
-    channel.on("broadcast", { event: "loot-reveal" }, ({ payload }) => {
-      if (payload?.round !== activeRoundRef.current) return;
-      setLootEffect(payload.lootEffect);
-      setRevealedLoot(true);
-      setResolutionStage("loot");
-      playSfx("flip");
-    });
-    channel.on("broadcast", { event: "round-result" }, ({ payload }) => {
-      if (payload?.round !== activeRoundRef.current) return;
-      const players = (payload.players as MatchPlayer[]).map((player) => ({ ...player, isUser: player.id === ownId }));
-      setMatchPlayers(players);
-      setHandValues(players.find((player) => player.isUser)?.hand ?? []);
-      setResolutionStage("result");
-      setResolutionWinnerIds(payload.winnerIds ?? []);
-      setRoundScoreChanges(payload.scoreChanges ?? []);
-      setResolutionMessage(payload.message ?? "");
-      if ((payload.winnerIds ?? []).includes(ownId)) commitProfile(advanceMission(profileRef.current, "roundWins"));
-      if ((payload.winnerIds ?? []).includes(ownId)) playSfx("handWin"); else playSfx("handLose");
-    });
-    channel.on("broadcast", { event: "round-next" }, ({ payload }) => onlineRoundAdvanceHandlerRef.current(payload));
-    channel.on("broadcast", { event: "match-finished" }, ({ payload }) => {
-      const players = (payload.players as MatchPlayer[]).map((player) => ({ ...player, isUser: player.id === ownId }));
-      setMatchPlayers(players);
-      setHandValues(players.find((player) => player.isUser)?.hand ?? []);
-      onlineFinishMatchRef.current(players);
-    });
     channel.on("broadcast", { event: "chat" }, ({ payload }) => {
       if (!payload || payload.sender_id === ownId) return;
       const emote = chatEmotes.find((item) => item.id === payload.emoteId);
@@ -1589,23 +1603,32 @@ export default function App() {
     profileRef.current = accountProfile;
     setProfile(accountProfile);
     setProfileNameDraft(accountProfile.name);
-    void supabase.from("profiles").select("display_name, username, username_changed_at, avatar_id").eq("id", userId).maybeSingle().then(({ data, error }) => {
+    void (async () => {
+      const [{ data, error }, progressResult] = await Promise.all([
+        supabase.from("profiles").select("display_name, username, username_changed_at, avatar_id, avatar_color").eq("id", userId).maybeSingle(),
+        supabase.rpc("load_player_game_progress"),
+      ]);
       if (!active) return;
       if (error) { setAuthMessage("No se pudo cargar el perfil. Comprueba que la migración de usuarios esté aplicada en Supabase."); setUsernameRequired(true); setUsernameMessage("Falta configurar los nombres de usuario en la base de datos."); setUsernameChecked(true); return; }
       if (!data) { setAuthMessage("Cuenta conectada. El perfil se creará al completar el primer registro."); setUsernameRequired(true); setUsernameChecked(true); return; }
       const current = readPlayerProfile(userId);
       const avatar = profileAvatarOptionsAll.includes(data.avatar_id) ? data.avatar_id : current.avatar;
       const lastNameChange = data.username_changed_at ? Date.parse(data.username_changed_at) : 0;
-      const next = { ...current, name: data.username || data.display_name || current.name, avatar, lastNameChange: Number.isFinite(lastNameChange) ? lastNameChange : 0 };
+      const savedProgress = progressResult.error || !progressResult.data || typeof progressResult.data !== "object" ? {} : progressResult.data as Partial<PlayerProfile>;
+      const next = { ...current, ...savedProgress, name: data.username || data.display_name || current.name, avatar, lastNameChange: Number.isFinite(lastNameChange) ? lastNameChange : 0 } as PlayerProfile;
       profileRef.current = next;
       setProfile(next);
       setProfileNameDraft(next.name);
       savePlayerProfile(next, userId);
+      if (data.avatar_color && /^#[0-9A-Fa-f]{6}$/.test(data.avatar_color)) {
+        const colored = { ...next, equippedAvatarColor: data.avatar_color };
+        profileRef.current = colored; setProfile(colored); savePlayerProfile(colored, userId);
+      }
       setUsernameDraft(data.username ?? "");
       setUsernameRequired(!data.username);
       setUsernameChecked(true);
       setAuthMessage("");
-    });
+    })();
     return () => { active = false; };
   }, [authSession?.user.id]);
 
@@ -1733,7 +1756,7 @@ export default function App() {
         socket.onclose = () => setChatConnection("local");
         socket.onerror = () => setChatConnection("local");
       } catch { setChatConnection("local"); }
-    } else setChatConnection(onlineMatch ? "online" : "local");
+    } else setChatConnection(onlineMatch?.isOnline ? "online" : "local");
     return () => {
       channel?.close();
       if (chatChannelRef.current === channel) chatChannelRef.current = null;
@@ -1774,7 +1797,7 @@ export default function App() {
     const message: LiveChatMessage = { id: `${Date.now()}-${Math.random().toString(36).slice(2)}`, sender: profileRef.current.name, avatar: profileRef.current.avatar, text, emoteId, time: Date.now(), isUser: true };
     setChatMessages((current) => [...current.slice(-49), message]);
     const wireMessage = { type: "chat", roomId: chatRoomId.current, sender: message.sender, avatar: message.avatar, text, emoteId };
-    if (onlineMatch && authSession) void onlineGameChannelRef.current?.send({ type: "broadcast", event: "chat", payload: { sender_id: authSession.user.id, sender: message.sender, avatar: message.avatar, text, emoteId } });
+    if (onlineMatch?.isOnline && authSession) void onlineGameChannelRef.current?.send({ type: "broadcast", event: "chat", payload: { sender_id: authSession.user.id, sender: message.sender, avatar: message.avatar, text, emoteId } });
     else if (chatSocketRef.current?.readyState === WebSocket.OPEN) chatSocketRef.current.send(JSON.stringify(wireMessage));
     else chatChannelRef.current?.postMessage(message);
     playSfx("click", 0.35);
@@ -1793,6 +1816,17 @@ export default function App() {
     profileRef.current = next;
     setProfile(next);
     savePlayerProfile(next, authSession?.user.id);
+    if (supabase && authSession) {
+      const client = supabase;
+      const progress = { ...next, coins: undefined, gems: undefined, winsByMode: undefined, winsByPeriod: undefined, winsPeriodResetAt: undefined };
+      progressMutationQueueRef.current = progressMutationQueueRef.current.then(async () => {
+        const { error } = await client.rpc("save_player_game_progress", { p_progress: progress });
+        if (error) throw error;
+      }).catch((error: unknown) => {
+        const message = error instanceof Error ? error.message : "";
+        if (authUserIdRef.current === authSession.user.id) setAccountWalletMessage(message ? `El progreso sigue en este dispositivo, pero no se sincronizó: ${message}` : "El progreso sigue en este dispositivo, pero no se pudo sincronizar con la cuenta.");
+      });
+    }
     if (supabase && authSession && (next.name !== previous.name || next.avatar !== previous.avatar)) {
       void supabase.from("profiles").update({ display_name: next.name, avatar_id: next.avatar }).eq("id", authSession.user.id).then(({ error }) => {
         if (error) setAuthMessage("Cambios guardados localmente, pero no se sincronizó el perfil remoto.");
@@ -2012,69 +2046,47 @@ export default function App() {
     }
   };
 
-  const openChest = (chestId: string, instant = false) => {
-    const activeProfile = profileRef.current;
-    const chest = activeProfile.chests.find((item) => item.id === chestId);
-    if (!chest) return;
-    const now = Date.now();
-    const ready = now >= chest.readyAt;
-    if (!ready && (!instant || activeProfile.gems < CHEST_SKIP_GEMS)) return;
-    let nextProfile: PlayerProfile = {
-      ...activeProfile,
-      gems: activeProfile.gems - (!ready ? CHEST_SKIP_GEMS : 0),
-      chests: activeProfile.chests.filter((item) => item.id !== chestId),
-    };
-    let result = "";
-    const roll = Math.random();
-    if (roll < 0.62) {
-      const coins = [20, 30, 40, 50][Math.floor(Math.random() * 4)];
-      nextProfile = { ...nextProfile, coins: nextProfile.coins + coins };
-      result = `+${coins} monedas`;
-    } else if (roll < 0.82) {
-      const card = inventoryCards[Math.floor(Math.random() * inventoryCards.length)];
-      if (nextProfile.ownedCards.includes(card.cardKey)) {
-        nextProfile = { ...nextProfile, coins: nextProfile.coins + DUPLICATE_CARD_COINS };
-        result = `REPETIDA · ${card.name} · +${DUPLICATE_CARD_COINS} monedas`;
-      } else {
-        nextProfile = { ...nextProfile, ownedCards: [...nextProfile.ownedCards, card.cardKey] };
-        result = `¡Nueva carta! ${card.name} · ${card.value}`;
-      }
-    } else if (roll < 0.924) {
-      const coins = [75, 100, 125, 150][Math.floor(Math.random() * 4)];
-      nextProfile = { ...nextProfile, coins: nextProfile.coins + coins };
-      result = `¡Gran premio! +${coins} monedas`;
-    } else if (roll < 0.925) {
-      const premiumItems = [
-        ...avatarStoreItems.map((item) => ({ kind: "avatar" as const, id: item.id, label: item.name })),
-        ...avatarFrameStoreItems.filter((item) => item.price > 0).map((item) => ({ kind: "frame" as const, id: item.id, label: item.name })),
-        ...chatEmotes.filter((item) => item.category !== "normales").map((item) => ({ kind: "emote" as const, id: item.id, label: item.label })),
-      ];
-      const prize = premiumItems[Math.floor(Math.random() * premiumItems.length)];
-      const owned = prize.kind === "avatar" ? nextProfile.ownedAvatars.includes(prize.id) : prize.kind === "frame" ? nextProfile.ownedFrames.includes(prize.id) : nextProfile.ownedChatEmotes.includes(prize.id);
-      if (owned) {
-        nextProfile = { ...nextProfile, coins: nextProfile.coins + CHEST_DUPLICATE_COINS };
-        result = `REPETIDO · ${prize.label} · +${CHEST_DUPLICATE_COINS} monedas`;
-      } else {
-        nextProfile = prize.kind === "avatar" ? { ...nextProfile, ownedAvatars: [...nextProfile.ownedAvatars, prize.id] } : prize.kind === "frame" ? { ...nextProfile, ownedFrames: [...nextProfile.ownedFrames, prize.id] } : { ...nextProfile, ownedChatEmotes: [...nextProfile.ownedChatEmotes, prize.id] };
-        result = `¡Premio especial! ${prize.label}`;
-      }
-    } else if (roll < 0.975) {
-      const gems = 15;
-      nextProfile = { ...nextProfile, gems: nextProfile.gems + gems };
-      result = `¡Gemas encontradas! +${gems} 💎`;
-    } else if (roll < 0.995) {
-      const gems = 30;
-      nextProfile = { ...nextProfile, gems: nextProfile.gems + gems };
-      result = `¡Gran hallazgo! +${gems} 💎`;
-    } else {
-      const gems = 60;
-      nextProfile = { ...nextProfile, gems: nextProfile.gems + gems };
-      result = `¡Premio extraordinario! +${gems} 💎`;
+  const syncServerRewardState = async () => {
+    const rewardState = await invokeGameAuthority("reward_state");
+    const latest = profileRef.current;
+    const serverMissions = normalizeMissions(latest.missions).map((mission) => ({
+      ...mission,
+      progress: Number(rewardState.missionProgress?.[mission.id]?.progress) || 0,
+      claimed: Boolean(rewardState.missionProgress?.[mission.id]?.claimed),
+    }));
+    const spin = rewardState.roulette ?? {};
+    const paidDate = spin.paid_spin_date ? new Date(`${spin.paid_spin_date}T00:00:00`).toDateString() : null;
+    const chests = Array.isArray(rewardState.chests) ? rewardState.chests : [];
+    commitProfile({
+      ...latest,
+      missions: serverMissions,
+      lastSpinTime: spin.last_free_at ? Date.parse(spin.last_free_at) : null,
+      paidSpinDate: paidDate,
+      paidSpinsToday: Number(spin.paid_spin_count) || 0,
+      chests,
+    });
+    return rewardState;
+  };
+
+  useEffect(() => {
+    if (!authSession || !usernameChecked || usernameRequired) return;
+    void syncServerRewardState().catch((error) => setAccountWalletMessage(error instanceof Error ? `No se pudieron cargar las recompensas de cuenta: ${error.message}` : "No se pudieron cargar las recompensas de cuenta."));
+  }, [authSession?.user.id, usernameChecked, usernameRequired]);
+
+  const openChest = async (chestId: string, instant = false) => {
+    try {
+      const result = await invokeGameAuthority("open_chest", { chestId, instant });
+      const rewardState = await syncServerRewardState();
+      const balance = { coins: Number(result.coins) || 0, gems: Number(result.gems) || 0 };
+      profileRef.current = { ...profileRef.current, ...balance, chests: rewardState.chests };
+      setProfile(profileRef.current); setAccountWallet(balance); savePlayerProfile(profileRef.current, authSession?.user.id);
+      setChestNotice(String(result.reward ?? "Cofre abierto."));
+      window.setTimeout(() => setChestNotice((current) => current === String(result.reward ?? "Cofre abierto.") ? "" : current), 6500);
+      playSfx("handWin");
+    } catch (error) {
+      setChestNotice(error instanceof Error ? error.message : "No se pudo abrir el cofre.");
+      await accountWalletRefreshRef.current();
     }
-    commitProfile(nextProfile);
-    setChestNotice(result);
-    window.setTimeout(() => setChestNotice((current) => current === result ? "" : current), 6500);
-    playSfx("handWin");
   };
 
   useEffect(() => {
@@ -2090,15 +2102,14 @@ export default function App() {
       const activeProfile = profileRef.current;
       const missions = normalizeMissions(activeProfile.missions);
       const rankingWindows = syncRankingPeriods(activeProfile.winsByPeriod, activeProfile.winsPeriodResetAt);
-      const { winsByPeriod, winsPeriodResetAt, rewardCoins: seasonCoins, rewardGems: seasonGems } = rankingWindows;
-      const nextProfile = { ...activeProfile, missions, winsByPeriod, winsPeriodResetAt, coins: activeProfile.coins + seasonCoins, gems: activeProfile.gems + seasonGems };
-      if (seasonCoins || seasonGems) setProfileMessage(`Recompensa de temporada: +${seasonCoins} monedas · +${seasonGems} gemas.`);
+      const { winsByPeriod, winsPeriodResetAt } = rankingWindows;
+      const nextProfile = { ...activeProfile, missions, winsByPeriod, winsPeriodResetAt };
       if (JSON.stringify(nextProfile) !== JSON.stringify(activeProfile)) commitProfile(nextProfile);
     }, 60_000);
     return () => window.clearInterval(interval);
   }, []);
 
-  const equipDeck = (id: string) => {
+  const equipDeck = async (id: string) => {
     if (!hasDeckCard(profile.ownedCards, id)) return;
     let equippedCards = profile.equippedCards;
     if (equippedCards.includes(id)) {
@@ -2108,15 +2119,23 @@ export default function App() {
       if (equippedCards.length >= 3) return;
       equippedCards = [...equippedCards, id];
     }
-    commitProfile({ ...profile, equippedCards, equippedCard: equippedCards[0] });
-    playSfx("click");
+    try {
+      const result = await invokeGameAuthority("equip_decks", { deckIds: equippedCards });
+      commitProfile({ ...profileRef.current, ownedCards: result.owned_cards ?? profileRef.current.ownedCards, equippedCards: result.equipped_cards ?? equippedCards, equippedCard: (result.equipped_cards ?? equippedCards)[0] });
+      playSfx("click");
+    } catch (error) { setAccountWalletMessage(error instanceof Error ? error.message : "No se pudo guardar la baraja equipada."); }
   };
 
-  const purchaseDeck = (id: string) => {
+  const purchaseDeck = async (id: string) => {
     const card = inventoryCards.find((entry) => entry.cardKey === id);
     if (!card || profile.ownedCards.includes(id) || wallet.coins < card.cardPrice) return;
-    commitProfile({ ...profile, coins: profile.coins - card.cardPrice, ownedCards: [...profile.ownedCards, id] });
-    playSfx("handWin");
+    try {
+      const result = await invokeGameAuthority("purchase_card", { cardKey: id, requestId: crypto.randomUUID() });
+      const balance = { coins: Math.max(0, Number(result.coins) || 0), gems: Math.max(0, Number(result.gems) || profileRef.current.gems) };
+      profileRef.current = { ...profileRef.current, ...balance }; setProfile(profileRef.current); setAccountWallet(balance); savePlayerProfile(profileRef.current, authSession?.user.id);
+      commitProfile({ ...profileRef.current, ownedCards: Array.isArray(result.owned_cards) ? result.owned_cards : [...profileRef.current.ownedCards, id] });
+      playSfx("handWin");
+    } catch (error) { setAccountWalletMessage(error instanceof Error ? error.message : "No se pudo comprar la carta."); await accountWalletRefreshRef.current(); }
   };
 
   const purchaseCosmetic = (kind: "avatar" | "frame", id: string) => {
@@ -2153,58 +2172,73 @@ export default function App() {
     playSfx("click");
   };
 
-  const claimMission = (id: PlayerMission["id"]) => {
-    const mission = profileRef.current.missions.find((item) => item.id === id);
-    if (!mission || mission.claimed || mission.progress < mission.target) return;
-    const missions = profileRef.current.missions.map((item) => item.id === id ? { ...item, claimed: true } : item);
-    commitProfile({
-      ...profileRef.current,
-      missions,
-      coins: profileRef.current.coins + (mission.rewardType === "coins" ? mission.rewardAmt : 0),
-      gems: profileRef.current.gems + (mission.rewardType === "gems" ? mission.rewardAmt : 0),
-    });
-    setProfileMessage(`Recompensa reclamada: +${mission.rewardAmt} ${mission.rewardType === "gems" ? "gemas" : "monedas"}.`);
-    playSfx("handWin");
+  const claimMission = async (id: PlayerMission["id"]) => {
+    try {
+      const result = await invokeGameAuthority("claim_mission", { missionId: id });
+      await syncServerRewardState();
+      const balance = { coins: Number(result.coins) || 0, gems: Number(result.gems) || 0 };
+      const next = { ...profileRef.current, ...balance };
+      profileRef.current = next; setProfile(next); setAccountWallet(balance); savePlayerProfile(next, authSession?.user.id);
+      setProfileMessage(`Recompensa reclamada: +${Number(result.reward) || 0} ${result.currency === "gems" ? "gemas" : "monedas"}.`);
+      playSfx("handWin");
+    } catch (error) {
+      setProfileMessage(error instanceof Error ? error.message : "No se pudo reclamar la misión.");
+      await syncServerRewardState().catch(() => {});
+    }
   };
 
-  const spinRoulette = (paid = false) => {
-    const activeProfile = profileRef.current;
-    const freeReady = !activeProfile.lastSpinTime || Date.now() - activeProfile.lastSpinTime >= 24 * 60 * 60 * 1000;
-    const today = new Date().toDateString();
-    const paidSpinsToday = activeProfile.paidSpinDate === today ? activeProfile.paidSpinsToday : 0;
-    const paidCost = Math.min(PAID_ROULETTE_BASE_GEMS + paidSpinsToday * PAID_ROULETTE_INCREMENT_GEMS, PAID_ROULETTE_MAX_GEMS);
-    if (rouletteSpinning || (!paid && !freeReady) || (paid && activeProfile.gems < paidCost)) return;
-    commitProfile(paid
-      ? { ...activeProfile, gems: activeProfile.gems - paidCost, paidSpinsToday: paidSpinsToday + 1, paidSpinDate: today }
-      : { ...activeProfile, lastSpinTime: Date.now() });
+  const spinRoulette = async (paid = false) => {
+    if (rouletteSpinning) return;
     setRouletteResult("");
     setRouletteSpinning(true);
-    let rouletteRoll = Math.random() * roulettePrizes.reduce((sum, prize) => sum + prize.weight, 0);
-    let prizeIndex = roulettePrizes.length - 1;
-    for (let index = 0; index < roulettePrizes.length; index += 1) {
-      rouletteRoll -= roulettePrizes[index].weight;
-      if (rouletteRoll < 0) { prizeIndex = index; break; }
-    }
-    setRouletteRotation((rotation) => {
-      const sectorCenter = prizeIndex * (360 / roulettePrizes.length) + 180 / roulettePrizes.length;
-      const currentAngle = ((rotation % 360) + 360) % 360;
-      const correction = (360 - ((sectorCenter + currentAngle) % 360)) % 360;
-      return rotation + 1800 + correction;
-    });
-    playSfx("cardSlide");
-    window.setTimeout(() => {
-      const reward = roulettePrizes[prizeIndex];
-      const latest = profileRef.current;
-      commitProfile({ ...latest, coins: latest.coins + reward.coins, gems: latest.gems + reward.gems });
-      setRouletteResult(reward.label === "NADA" ? "Esta vez no ha tocado premio." : `¡Has ganado ${reward.label}!`);
+    try {
+      const result = await invokeGameAuthority("spin", { paid });
+      const prizeIndex = Math.max(0, Math.min(roulettePrizes.length - 1, Number(result.prize_index) || 0));
+      setRouletteRotation((rotation) => {
+        const sectorCenter = prizeIndex * (360 / roulettePrizes.length) + 180 / roulettePrizes.length;
+        const currentAngle = ((rotation % 360) + 360) % 360;
+        const correction = (360 - ((sectorCenter + currentAngle) % 360)) % 360;
+        return rotation + 1800 + correction;
+      });
+      playSfx("cardSlide");
+      window.setTimeout(async () => {
+        const latest = profileRef.current;
+        const balance = { coins: Number(result.coins) || 0, gems: Number(result.gems) || 0 };
+        const next = { ...latest, ...balance, lastSpinTime: result.last_free_at ? Date.parse(result.last_free_at) : latest.lastSpinTime, paidSpinsToday: Number(result.paid_count) || 0, paidSpinDate: paid ? new Date().toDateString() : latest.paidSpinDate };
+        profileRef.current = next; setProfile(next); setAccountWallet(balance); savePlayerProfile(next, authSession?.user.id);
+        await syncServerRewardState().catch(() => {});
+        const prize = roulettePrizes[prizeIndex];
+        setRouletteResult(prize.label === "NADA" ? "Esta vez no ha tocado premio." : `¡Has ganado ${prize.label}!`);
+        setRouletteSpinning(false);
+        if (Number(result.coins_awarded) || Number(result.gems_awarded)) playSfx("handWin"); else playSfx("handLose");
+      }, 3050);
+    } catch (error) {
       setRouletteSpinning(false);
-      if (reward.coins || reward.gems) playSfx("handWin"); else playSfx("handLose");
-    }, 3050);
+      setRouletteResult(error instanceof Error ? error.message : "No se pudo girar la ruleta.");
+      await accountWalletRefreshRef.current();
+      await syncServerRewardState().catch(() => {});
+    }
   };
 
-  const startMatch = (mode: GameMode) => {
+  const startMatch = async (mode: GameMode) => {
     if (!authSession || !accountWallet) { setScreen("auth"); return; }
+    if (!supabase || accountWallet.coins < MATCH_ENTRY_FEE) return;
+    const matchId = crypto.randomUUID();
+    const { data: started, error: startError } = await supabase.rpc("start_offline_match", { p_match_id: matchId, p_mode: mode });
+    if (startError) {
+      setAccountWalletMessage(startError.message.includes("insufficient_funds") ? "No tienes monedas suficientes para pagar la entrada." : `No se pudo iniciar la partida: ${startError.message}`);
+      await accountWalletRefreshRef.current();
+      return;
+    }
+    const walletRow = Array.isArray(started) ? started[0] : started;
+    if (walletRow) {
+      const balance = { coins: Number(walletRow.coins), gems: Number(walletRow.gems) };
+      setAccountWallet(balance);
+      profileRef.current = { ...profileRef.current, ...balance };
+      setProfile(profileRef.current);
+    }
     setOnlineMatch(null);
+    setActiveMatchId(matchId);
     setOnlineSubmittedBids({});
     setOnlineRoomReady(false);
     const activeProfile = profileRef.current;
@@ -2221,9 +2255,18 @@ export default function App() {
     const decks = activeProfile.equippedCards.filter((id) => hasDeckCard(activeProfile.ownedCards, id)).slice(0, 3);
     const selectedDecks = decks.length ? decks : ["basica"];
     const players = createMatchPlayers(mode, { ...activeProfile, equippedCard: selectedDecks[0] }, selectedDecks);
+    const offlineSetup: OnlineMatchSetup = {
+      id: matchId,
+      mode,
+      hostId: authSession.user.id,
+      isOnline: false,
+      roster: players.map((player) => ({ id: player.id, username: player.name, avatar: player.avatar, team: player.team })),
+    };
+    setOnlineMatch(offlineSetup);
+    setOnlineRoomReady(true);
     setGameMode(mode);
     setRound(1);
-    setRoundRules(createRoundRules(modeRoundCount(mode)));
+    setRoundRules([]);
     setMatchPlayers(players);
     setHandValues(players[0].hand);
     setSelected(null);
@@ -2246,54 +2289,88 @@ export default function App() {
     setPage("game");
     setScreen("game");
     setPanel(null);
-    commitProfile(advanceMission({ ...activeProfile, coins: activeProfile.coins - MATCH_ENTRY_FEE }, "games"));
+    commitProfile({ ...activeProfile, coins: walletRow ? Number(walletRow.coins) : accountWallet.coins, gems: walletRow ? Number(walletRow.gems) : accountWallet.gems });
+    try {
+      const view = await invokeGameAuthority("start_match", { matchId });
+      applyOnlineAuthorityView(view);
+    } catch (error) {
+      setAccountWalletMessage(error instanceof Error ? `No se pudo iniciar la partida segura: ${error.message}` : "No se pudo iniciar la partida segura.");
+    }
     playSfx("deal");
   };
 
-  const receiveOnlineMatch = (setup: OnlineMatchSetup) => {
-    if (!authSession || !setup.roster.some((member) => member.id === authSession?.user.id)) return;
-    if (onlineQueueChannelRef.current && supabase) { void supabase.removeChannel(onlineQueueChannelRef.current); onlineQueueChannelRef.current = null; }
-    setOnlineQueueMode(null);
-    setOnlineQueueMessage("");
-    setOnlineMatch(setup);
-    setOnlineRoomReady(false);
-    onlineResolvedRoundRef.current = 0;
-    setOnlineSubmittedBids({});
-    chatRoomId.current = setup.id;
-    setChatSessionId(crypto.randomUUID());
-    setChatConnection("online");
-    setChatMessages([]);
-    setChatDraft("");
-    setChatEmotesOpen(false);
-    setChatEmoteCategory("normales");
-    resolutionRunRef.current += 1;
-    setGameMode(setup.mode);
-    setRound(1);
-    setRoundRules(setup.rules);
-    const players = setup.players.map((player) => ({ ...player, isUser: player.id === authSession.user.id }));
+  const applyOnlineAuthorityView = (view: any) => {
+    if (!authSession || !view) return;
+    const players = (view.players ?? []).map((player: any) => ({ ...player, score: Number(player.score) || 0, hand: player.isUser ? view.hand ?? [] : [], isUser: player.id === authSession.user.id })) as MatchPlayer[];
+    setGameMode(view.mode);
+    setRound(Number(view.round) || 1);
+    setRoundRules(view.roundRules ?? (view.rule ? [view.rule] : []));
     setMatchPlayers(players);
-    const localPlayer = players.find((player) => player.isUser);
-    setHandValues(localPlayer?.hand ?? []);
-    setSelected(null);
-    setRemovalsUsedThisMatch(0);
-    setRemoveMode(false);
-    setBidPlaced(false);
-    setTurnSeconds(30);
-    setRevealedBids(null);
-    setRevealedLoot(false);
-    setResolutionStage("idle");
-    setResolutionWinnerIds([]);
-    setRoundScoreChanges([]);
-    setLootEffect(setup.lootEffect);
-    setLootValues(setup.lootValues);
-    setCarriedPot(0);
-    setResolutionMessage("");
-    setMatchResult(null);
-    setPage("game");
-    setScreen("game");
-    setPanel(null);
-    const current = profileRef.current;
-    if (current.coins >= MATCH_ENTRY_FEE) commitProfile(advanceMission({ ...current, coins: current.coins - MATCH_ENTRY_FEE }, "games"));
+    setHandValues(view.hand ?? []);
+    setCarriedPot(Number(view.carriedPot) || 0);
+    setLootValues(view.lootValues ?? []);
+    setRemovalsUsedThisMatch(Number(view.removalsUsed) || 0);
+    setBidPlaced(Boolean(view.hasSubmitted));
+    if (Number.isInteger(view.ownBid)) setSelected(view.ownBid);
+    setTurnSeconds(Math.max(0, Math.ceil(((Number(view.turnDeadline) || Date.now()) - Date.now()) / 1000)));
+    setLootEffect(view.result?.lootEffect ?? hiddenLootEffects[0]);
+    setRevealedLoot(view.phase === "resolved" || view.status === "completed");
+    setResolutionStage(view.phase === "resolved" ? "result" : "idle");
+    if (view.result) {
+      setResolutionWinnerIds(view.result.winnerIds ?? []);
+      setRoundScoreChanges(view.result.scoreChanges ?? []);
+      setResolutionMessage(view.result.message ?? "");
+      setRevealedBids((view.result.revealed ?? []).map((entry: any) => ({ ...entry.card, value: entry.face_value })));
+    } else {
+      setResolutionWinnerIds([]); setRoundScoreChanges([]); setResolutionMessage(""); setRevealedBids(null);
+    }
+  };
+
+  const receiveOnlineMatch = async (setup: OnlineMatchSetup) => {
+    if (!authSession || !setup.roster.some((member) => member.id === authSession?.user.id) || !supabase) return;
+    // Ignore unsolicited Realtime payloads; only a player in this mode's queue may join/pay.
+    if (onlineQueueMode !== setup.mode) return;
+    if (setup.hostId !== authSession.user.id) {
+      const { error: joinError } = await supabase.rpc("join_online_match", { p_match_id: setup.id });
+      if (joinError) {
+        setOnlineQueueMessage(joinError.message.includes("insufficient_funds") ? "No tienes monedas suficientes para pagar la entrada online." : `No se pudo reservar tu plaza: ${joinError.message}`);
+        return;
+      }
+    }
+    setActiveMatchId(setup.id);
+    let matchStatus = "waiting";
+    for (let attempt = 0; attempt < 45; attempt++) {
+      const { data: status, error: statusError } = await supabase.rpc("online_match_status", { p_match_id: setup.id });
+      if (statusError) break;
+      matchStatus = String(status ?? "waiting");
+      if (matchStatus === "active") break;
+      await new Promise((resolve) => window.setTimeout(resolve, 1000));
+    }
+    if (matchStatus !== "active") {
+      const { error: cancelError } = await supabase.rpc("cancel_online_match", { p_match_id: setup.id });
+      if (cancelError) setAccountWalletMessage(`No se pudo cerrar la cola ni confirmar la devolución de la entrada: ${cancelError.message}`);
+      else await accountWalletRefreshRef.current();
+      setActiveMatchId(null);
+      setOnlineQueueMessage("La mesa no pudo confirmar a todos los jugadores. Vuelve a buscar partida.");
+      return;
+    }
+    await accountWalletRefreshRef.current();
+    if (onlineQueueChannelRef.current) { void supabase.removeChannel(onlineQueueChannelRef.current); onlineQueueChannelRef.current = null; }
+    setOnlineQueueMode(null); setOnlineQueueMessage("");
+    setOnlineMatch(setup); setOnlineRoomReady(false); setOnlineSubmittedBids({});
+    onlineResolvedRoundRef.current = 0; authoritativeAnimationRoundRef.current = 0; authoritativeAnimationBusyRef.current = false; authoritativeMatchFinishedRef.current = false;
+    chatRoomId.current = setup.id; setChatSessionId(crypto.randomUUID()); setChatConnection("online");
+    setChatMessages([]); setChatDraft(""); setChatEmotesOpen(false); setChatEmoteCategory("normales");
+    resolutionRunRef.current += 1;
+    setSelected(null); setRemovalsUsedThisMatch(0); setRemoveMode(false); setBidPlaced(false); setTurnSeconds(30);
+    setRevealedBids(null); setRevealedLoot(false); setResolutionStage("idle"); setResolutionWinnerIds([]); setRoundScoreChanges([]); setResolutionMessage(""); setMatchResult(null);
+    setPage("game"); setScreen("game"); setPanel(null);
+    try {
+      const view = await invokeGameAuthority("start_match", { matchId: setup.id });
+      applyOnlineAuthorityView(view);
+    } catch (error) {
+      setAccountWalletMessage(error instanceof Error ? error.message : "No se pudo iniciar el motor seguro de la partida.");
+    }
     matchEventsRef.current = getActiveEvents(new Date());
     playSfx("deal");
   };
@@ -2325,6 +2402,14 @@ export default function App() {
   };
 
   const cancelOnlineQueue = () => {
+    const pendingMatchId = activeMatchId;
+    if (pendingMatchId && supabase && authSession && !onlineMatch) {
+      void supabase.rpc("cancel_online_match", { p_match_id: pendingMatchId }).then(async ({ error }) => {
+        if (error) setAccountWalletMessage(`No se pudo cancelar la cola online: ${error.message}`);
+        else await accountWalletRefreshRef.current();
+        setActiveMatchId((current) => current === pendingMatchId ? null : current);
+      });
+    }
     if (onlineQueueChannelRef.current && supabase) void supabase.removeChannel(onlineQueueChannelRef.current);
     onlineQueueChannelRef.current = null;
     setOnlineQueueMode(null);
@@ -2378,19 +2463,27 @@ export default function App() {
         id: entry.user_id,
         username: entry.username,
         avatar: entry.avatar || "🐱",
-        deckIds: Array.isArray(entry.deck_ids) ? entry.deck_ids.slice(0, 3) : ["basica"],
-        ownedCards: Array.isArray(entry.owned_cards) ? entry.owned_cards : [],
         team: mode === "teams" ? (Math.floor(index / 2) === 0 ? 1 : 2) : 0,
       }));
-      const players: MatchPlayer[] = roster.map((member) => ({ id: member.id, name: member.username, avatar: member.avatar, score: 0, hand: dealHand(member.deckIds, 5, member.ownedCards), team: member.team, isUser: member.id === userId }));
-      const setup: OnlineMatchSetup = { id: crypto.randomUUID(), mode, hostId: userId, roster, players, rules: createRoundRules(modeRoundCount(mode)), lootValues: generateLootValues(), lootEffect: hiddenLootEffects[Math.floor(Math.random() * hiddenLootEffects.length)] };
-      void channel.send({ type: "broadcast", event: "match-found", payload: setup });
-      onlineMatchHandlerRef.current(setup);
+      const setup: OnlineMatchSetup = { id: crypto.randomUUID(), mode, hostId: userId, roster, isOnline: true };
+      void (async () => {
+        const { error } = await supabase.rpc("create_online_match", { p_match_id: setup.id, p_mode: mode, p_participant_ids: roster.map((member) => member.id) });
+        if (error) {
+          claimed = false;
+          setOnlineQueueMessage(error.message.includes("insufficient_funds") ? "No tienes monedas suficientes para pagar la entrada online." : `No se pudo reservar la partida: ${error.message}`);
+          await accountWalletRefreshRef.current();
+          return;
+        }
+        setActiveMatchId(setup.id);
+        await accountWalletRefreshRef.current();
+        void channel.send({ type: "broadcast", event: "match-found", payload: setup });
+        void onlineMatchHandlerRef.current(setup);
+      })();
     });
     channel.subscribe((status) => {
       if (status === "SUBSCRIBED") {
         setOnlineQueueMessage(`Buscando rivales para ${mode === "classic" ? "Clásico 4P" : mode === "teams" ? "Equipos 2v2" : "Duelo 1v1"}…`);
-        void channel.track({ user_id: userId, username: profile.name, avatar: profile.avatar, mode, party_id: mode === "teams" ? partyId : null, deck_ids: profile.equippedCards, owned_cards: profile.ownedCards, joined_at: Date.now() });
+        void channel.track({ user_id: userId, username: profile.name, avatar: profile.avatar, mode, party_id: mode === "teams" ? partyId : null, joined_at: Date.now() });
       } else if (status === "CHANNEL_ERROR" || status === "TIMED_OUT") setOnlineQueueMessage("No se pudo conectar a la cola online. Comprueba tu conexión y vuelve a intentarlo.");
     });
   };
@@ -2399,6 +2492,15 @@ export default function App() {
     const activeProfile = profileRef.current;
     const cost = Math.min(CARD_REMOVAL_BASE_GEMS + removalsUsedThisMatch * CARD_REMOVAL_INCREMENT_GEMS, CARD_REMOVAL_MAX_GEMS);
     if (bidPlaced || activeProfile.gems < cost || !handValues[index]) return;
+    if (onlineMatch) {
+      void invokeGameAuthority("remove", { matchId: onlineMatch.id, cardIndex: index, requestId: crypto.randomUUID() }).then((view) => {
+        applyOnlineAuthorityView(view);
+        setRemoveMode(false); setSelected(null);
+        setResolutionMessage(`Carta retirada · coste: ${cost} gemas. La siguiente retirada costará ${Math.min(cost + CARD_REMOVAL_INCREMENT_GEMS, CARD_REMOVAL_MAX_GEMS)} gemas.`);
+        void accountWalletRefreshRef.current(); playSfx("deal");
+      }).catch((error) => { setAccountWalletMessage(error instanceof Error ? error.message : "No se pudo retirar la carta."); void accountWalletRefreshRef.current(); });
+      return;
+    }
     const nextHand = [...handValues];
     nextHand[index] = dealHand(activeProfile.equippedCards, 1, activeProfile.ownedCards)[0];
     commitProfile({ ...advanceMission(activeProfile, "removals"), gems: activeProfile.gems - cost });
@@ -2411,7 +2513,7 @@ export default function App() {
     playSfx("deal");
   };
 
-  const finishMatch = (players: MatchPlayer[], roundBonusCoins = 0) => {
+  const finishMatch = async (players: MatchPlayer[], roundBonusCoins = 0, serverSettlement?: any) => {
     const activeProfile = profileRef.current;
     let winningTeam: number | null = null;
     let winners: MatchPlayer[] = [];
@@ -2424,13 +2526,13 @@ export default function App() {
       const highScore = Math.max(...players.map((player) => player.score));
       winners = players.filter((player) => player.score === highScore);
     }
-    const winningPlayers = gameMode === "teams" ? winners : winners.length === 1 ? winners : [];
-    const playerWon = winningPlayers.some((player) => player.isUser);
-    const won = gameMode === "teams" ? winners.length > 0 && playerWon : winners.length === 1 && playerWon;
-    const winnerLabel = gameMode === "teams" ? (winningTeam === 1 ? "Equipo Azul" : winningTeam === 2 ? "Equipo Rojo" : "Empate") : winners.length === 1 ? winners[0].name : winners.length ? "Empate" : "Empate";
+    let winningPlayers = gameMode === "teams" ? winners : winners.length === 1 ? winners : [];
     const rows = gameMode === "teams"
       ? [1, 2].map((team) => ({ name: team === 1 ? "Equipo Azul" : "Equipo Rojo", score: Math.floor(players.filter((player) => player.team === team).reduce((sum, player) => sum + player.score, 0)) })).sort((a, b) => b.score - a.score)
       : [...players].sort((a, b) => b.score - a.score).map((player) => ({ name: player.isUser ? activeProfile.name : player.name, score: Math.floor(player.score) }));
+    let playerWon = winningPlayers.some((player) => player.isUser);
+    let won = gameMode === "teams" ? winners.length > 0 && playerWon : winners.length === 1 && playerWon;
+    let winnerLabel = gameMode === "teams" ? (winningTeam === 1 ? "Equipo Azul" : winningTeam === 2 ? "Equipo Rojo" : "Empate") : winners.length === 1 ? winners[0].name : winners.length ? "Empate" : "Empate";
     const modeKey = gameMode;
     const rankingWindows = syncRankingPeriods(activeProfile.winsByPeriod, activeProfile.winsPeriodResetAt);
     const winsByMode = { ...activeProfile.winsByMode, [modeKey]: { ...activeProfile.winsByMode[modeKey] } };
@@ -2438,25 +2540,85 @@ export default function App() {
       weekly: { ...rankingWindows.winsByPeriod.weekly, [modeKey]: { ...rankingWindows.winsByPeriod.weekly[modeKey] } },
       monthly: { ...rankingWindows.winsByPeriod.monthly, [modeKey]: { ...rankingWindows.winsByPeriod.monthly[modeKey] } },
     };
-    for (const winner of winningPlayers) {
+    const serverMatch = Boolean(onlineMatch && activeMatchId && supabase && authSession);
+    if (!serverMatch) for (const winner of winningPlayers) {
       const key = winner.isUser ? "player" : winner.name;
       winsByMode[modeKey][key] = (winsByMode[modeKey][key] ?? 0) + 1;
       winsByPeriod.weekly[modeKey][key] = (winsByPeriod.weekly[modeKey][key] ?? 0) + 1;
       winsByPeriod.monthly[modeKey][key] = (winsByPeriod.monthly[modeKey][key] ?? 0) + 1;
     }
-    let rewardCoins = (won ? gameMode === "duel" ? 25 : gameMode === "teams" ? 40 : 50 : 5) + bonusCoinsWon + roundBonusCoins;
-    let rewardGems = 0;
-    const completedEvent = won ? matchEventsRef.current.find((event) => event.mode === gameMode) : undefined;
-    if (completedEvent) {
-      if (completedEvent.reward.coinMultiplier) rewardCoins = Math.floor(rewardCoins * completedEvent.reward.coinMultiplier);
-      rewardCoins += completedEvent.reward.coinBonus ?? 0;
-      rewardGems += completedEvent.reward.gemBonus ?? 0;
+    let rewardCoins = 0;
+    const rewardGems = 0;
+    let serverBalance: { coins: number; gems: number } | null = null;
+    let serverSettlementValid = false;
+    if (serverMatch && supabase && authSession && activeMatchId) {
+      if (serverSettlement?.status === "completed") {
+        serverSettlementValid = true;
+        const winnerIds = Array.isArray(serverSettlement.winnerIds) ? serverSettlement.winnerIds as string[] : [];
+        winners = winnerIds.length ? players.filter((player) => winnerIds.includes(player.id)) : winners;
+        winningPlayers = winners;
+        playerWon = winnerIds.length ? winnerIds.includes(authSession.user.id) : winners.some((player) => player.isUser);
+        won = playerWon;
+        if (gameMode === "teams" && winners.length) winningTeam = winners[0].team;
+        winnerLabel = gameMode === "teams" ? (winningTeam === 1 ? "Equipo Azul" : winningTeam === 2 ? "Equipo Rojo" : "Empate") : winners.length === 1 ? winners[0].name : "Empate";
+        rewardCoins = Math.max(0, Number(serverSettlement.rewardCoins) || 0);
+        serverBalance = { coins: Math.max(0, Number(serverSettlement.coins) || 0), gems: Math.max(0, Number(serverSettlement.gems) || 0) };
+        if (screen === "ranking" || screen === "season-ranking") setGlobalRankingRows([]);
+      } else {
+        setAccountWalletMessage("La partida sigue esperando la validación del servidor; todavía no se muestran recompensas finales.");
+        return;
+      }
+    } else if (activeMatchId && supabase && authSession) {
+      const { data, error } = await supabase.rpc("complete_offline_match", { p_match_id: activeMatchId });
+      const row = Array.isArray(data) ? data[0] : data;
+      if (error) setAccountWalletMessage(`No se pudo cerrar la partida en el servidor: ${error.message}`);
+      else if (row) {
+        serverSettlementValid = true;
+        rewardCoins = Math.max(0, Number(row.reward_coins) || 0);
+        serverBalance = { coins: Math.max(0, Number(row.coins) || 0), gems: Math.max(0, Number(row.gems) || 0) };
+      }
     }
-    const chestAdded = won && activeProfile.chests.length < MAX_CHESTS;
-    const chests = chestAdded ? [...activeProfile.chests, { id: crypto.randomUUID(), createdAt: Date.now(), readyAt: Date.now() + CHEST_WAIT_MS }] : activeProfile.chests;
+    const completedEvent = undefined;
+    // Chests require their own server-owned inventory transaction; don't mint a
+    // client-side chest until that endpoint is enabled.
+    const chests = serverSettlement?.chests ?? activeProfile.chests;
+    const chestAdded = Boolean(serverSettlement?.chestAdded);
+    if (serverMatch && !serverSettlementValid) {
+      winners = [];
+      winningPlayers = [];
+      won = false;
+      playerWon = false;
+      winnerLabel = "Resultado pendiente de validación";
+    }
+    if (serverMatch && serverSettlementValid && supabase && authSession) {
+      const now = new Date();
+      const weekStart = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate()));
+      weekStart.setUTCDate(weekStart.getUTCDate() - ((weekStart.getUTCDay() + 6) % 7));
+      const monthStart = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), 1));
+      const { data: rankingData } = await supabase.from("ranking_totals").select("mode,period,period_start,wins").eq("user_id", authSession.user.id);
+      for (const mode of ["classic", "teams", "duel"] as GameMode[]) {
+        winsByMode[mode].player = 0;
+        winsByPeriod.weekly[mode].player = 0;
+        winsByPeriod.monthly[mode].player = 0;
+      }
+      for (const row of rankingData ?? []) {
+        const mode = row.mode as GameMode;
+        if (!(mode in winsByMode)) continue;
+        const start = String(row.period_start);
+        if (row.period === "total") winsByMode[mode].player = Number(row.wins) || 0;
+        if (row.period === "weekly" && start === weekStart.toISOString().slice(0, 10)) winsByPeriod.weekly[mode].player = Number(row.wins) || 0;
+        if (row.period === "monthly" && start === monthStart.toISOString().slice(0, 10)) winsByPeriod.monthly[mode].player = Number(row.wins) || 0;
+      }
+    }
     const progressProfile = won ? advanceMission(activeProfile, "matchWins") : activeProfile;
-    commitProfile({ ...progressProfile, coins: progressProfile.coins + rewardCoins + rankingWindows.rewardCoins, gems: progressProfile.gems + rewardGems + rankingWindows.rewardGems, winsByMode, winsByPeriod, winsPeriodResetAt: rankingWindows.winsPeriodResetAt, chests });
-    if (rankingWindows.rewardCoins || rankingWindows.rewardGems) setProfileMessage(`Recompensa de temporada: +${rankingWindows.rewardCoins} monedas · +${rankingWindows.rewardGems} gemas.`);
+    if (serverBalance) {
+      profileRef.current = { ...profileRef.current, ...serverBalance };
+      setProfile(profileRef.current);
+      setAccountWallet(serverBalance);
+    }
+    commitProfile({ ...progressProfile, ...(serverBalance ?? {}), winsByMode, winsByPeriod, winsPeriodResetAt: rankingWindows.winsPeriodResetAt, chests });
+    if (serverMatch && serverSettlementValid) void syncServerRewardState().catch(() => {});
+    setActiveMatchId(null);
     setMatchResult({ title: winnerLabel === "Empate" ? "¡EMPATE!" : won ? (gameMode === "teams" ? "¡VICTORIA DE EQUIPO!" : "¡VICTORIA!") : (gameMode === "teams" ? "¡DERROTA DE EQUIPO!" : "DERROTA"), winner: winnerLabel, rows, coinReward: rewardCoins, gemReward: rewardGems, eventBonus: completedEvent?.rewardText, chestAdded, matchWon: won });
     if (won) playSfx("handWin"); else playSfx("handLose");
   };
@@ -2464,16 +2626,20 @@ export default function App() {
   onlineFinishMatchRef.current = (players) => finishMatch(players);
 
   const resolveRound = (chosenIndex = selected, bidIndexes: Record<string, number> = {}) => {
+    if (onlineMatch) return;
     if (chosenIndex === null || (bidPlaced && !onlineMatch) || resolutionStage !== "idle" || !matchPlayers.length) return;
     const activeProfile = profileRef.current;
     const activeRule = activeRoundRule;
     if (!onlineMatch) commitProfile(advanceMission(activeProfile, "bids"));
     const humanCard = handValues[chosenIndex] ?? handValues[0] ?? { value: 1, deckId: "basica" };
     const humanValue = humanCard.value;
-    const knifePassive = hasActiveSet(activeProfile, "cuchillo");
-    const ninjaPassive = hasActiveSet(activeProfile, "banda");
-    const toxicSetPassive = hasActiveSet(activeProfile, "veneno");
     const playersForRound = matchPlayers.map((player) => ({ ...player, score: Math.floor(player.score), hand: [...player.hand] }));
+    const playerHasSet = (player: MatchPlayer, deckId: string) => {
+      if (!onlineMatch) return player.isUser && hasActiveSet(activeProfile, deckId);
+      const member = onlineMatch.roster.find((entry) => entry.id === player.id);
+      return Boolean(member?.deckIds.includes(deckId) && hasCompleteDeck(member.ownedCards, deckId));
+    };
+    const knifePassive = playersForRound.some((player) => playerHasSet(player, "cuchillo"));
     const startingScores = new Map(playersForRound.map((player) => [player.id, player.score]));
     const previousLeader = [...playersForRound].sort((a, b) => b.score - a.score)[0];
     const previousLastScore = Math.min(...playersForRound.map((player) => player.score));
@@ -2495,12 +2661,12 @@ export default function App() {
       }
       const playedCard = player.isUser ? humanCard : hand[cardIndex] ?? { value: 1, deckId: "basica" };
       const rawValue = player.isUser ? humanValue : playedCard.value;
-      const isRival = gameMode !== "teams" || player.team !== playersForRound[0].team;
       let value = rawValue;
       if (playedCard.effectId === "bid-plus-one") value += 1;
-      if (player.isUser && ninjaPassive && rawValue <= 3) { value += 2; passiveNotes.push("Banda: +2 a tu puja baja"); }
-      if (player.isUser && toxicSetPassive && playedCard.deckId === "veneno" && rawValue >= 6) { value += 1; passiveNotes.push("Tóxicos: +1 a la puja"); }
-      if (!player.isUser && knifePassive && isRival) value = Math.max(1, value - 1);
+      if (playerHasSet(player, "banda") && rawValue <= 3) { value += 2; passiveNotes.push(`${player.isUser ? "Tú" : player.name}: Banda +2 a puja baja`); }
+      if (playerHasSet(player, "veneno") && playedCard.deckId === "veneno" && rawValue >= 6) { value += 1; passiveNotes.push(`${player.isUser ? "Tú" : player.name}: Tóxicos +1 a la puja`); }
+      const knifeAttacker = playersForRound.some((attacker) => playerHasSet(attacker, "cuchillo") && attacker.id !== player.id && (gameMode !== "teams" || attacker.team !== player.team));
+      if (knifeAttacker) value = Math.max(1, value - 1);
       player.hand.splice(cardIndex, 1);
       return { player, value, faceValue: rawValue, card: playedCard };
     });
@@ -2563,7 +2729,7 @@ export default function App() {
       } else {
         const winningTeam: 1 | 2 = blueStrength > redStrength ? 1 : 2;
         winners = playersForRound.filter((player) => player.team === winningTeam);
-        if (winners.some((winner) => winner.isUser) && hasActiveSet(activeProfile, "escudo") && effect.type === "BOMBA") { bombDamage = 0; passiveNotes.push("Escudo: Bomba anulada"); }
+        if (winners.some((winner) => playerHasSet(winner, "escudo")) && effect.type === "BOMBA") { bombDamage = 0; passiveNotes.push("Escudo: Bomba anulada"); }
         const winningPlays = plays.filter((play) => play.player.team === winningTeam);
         const payout = payoutFor(winningPlays);
         winners.forEach((winner) => { winner.score += payout; });
@@ -2577,7 +2743,7 @@ export default function App() {
       const tied = contenders.filter((play) => ruleScore(play.value) === bestValue);
       if (tied.length === 1) {
         winners = [tied[0].player];
-        if (winners[0].isUser && hasActiveSet(activeProfile, "escudo") && effect.type === "BOMBA") { bombDamage = 0; passiveNotes.push("Escudo: Bomba anulada"); }
+        if (playerHasSet(winners[0], "escudo") && effect.type === "BOMBA") { bombDamage = 0; passiveNotes.push("Escudo: Bomba anulada"); }
         const payout = payoutFor(tied);
         winners[0].score += payout;
         message = `${winners[0].isUser ? "¡TÚ GANAS" : `${winners[0].name} gana`} y se lleva ${payout} puntos.`;
@@ -2712,52 +2878,89 @@ export default function App() {
   const placeBid = (chosenIndex = selected) => {
     if (chosenIndex === null || bidPlaced || resolutionStage !== "idle" || !matchPlayers.length) return;
     if (!onlineMatch) { resolveRound(chosenIndex); return; }
-    if (!onlineRoomReady || !authSession || onlineSubmittedBids[authSession.user.id] !== undefined) return;
-    const submitted = { match_id: onlineMatch.id, round, player_id: authSession.user.id, card_index: chosenIndex };
-    setOnlineSubmittedBids((current) => ({ ...current, [authSession.user.id]: chosenIndex }));
+    if ((onlineMatch.isOnline !== false && !onlineRoomReady) || !authSession || onlineSubmittedBids[authSession.user.id] !== undefined) return;
     setSelected(chosenIndex);
     setBidPlaced(true);
-    commitProfile(advanceMission(profileRef.current, "bids"));
     playSfx("confirm");
-    void onlineGameChannelRef.current?.send({ type: "broadcast", event: "bid", payload: submitted });
+    void invokeGameAuthority("bid", { matchId: onlineMatch.id, round, cardIndex: chosenIndex }).then((view) => { if (view.phase !== "resolved") applyOnlineAuthorityView(view); }).catch((error) => {
+      setBidPlaced(false); setSelected(null);
+      setAccountWalletMessage(error instanceof Error ? error.message : "No se pudo enviar la puja al servidor.");
+    });
   };
 
   useEffect(() => {
-    if (!onlineMatch || !authSession || screen !== "game" || page !== "game" || resolutionStage !== "idle") return;
-    if (authSession.user.id !== onlineMatch.hostId || onlineResolvedRoundRef.current === round) return;
-    const bidIds = Object.keys(onlineSubmittedBids);
-    if (!onlineMatch.roster.every((player) => bidIds.includes(player.id))) return;
-    const ownIndex = onlineSubmittedBids[authSession.user.id];
-    if (ownIndex === undefined) return;
-    onlineResolvedRoundRef.current = round;
-    resolveRound(ownIndex, onlineSubmittedBids);
-  }, [onlineMatch?.id, authSession?.user.id, onlineSubmittedBids, screen, page, resolutionStage, round]);
+    if (!onlineMatch || !authSession || screen !== "game" || page !== "game") return;
+    let active = true;
+    const poll = async () => {
+      if (!active || authoritativeAnimationBusyRef.current || authoritativeMatchFinishedRef.current) return;
+      try {
+        const view = await invokeGameAuthority("state", { matchId: onlineMatch.id });
+        if (!active) return;
+        if (view.status === "completed") {
+          if (authoritativeMatchFinishedRef.current) return;
+          authoritativeMatchFinishedRef.current = true;
+          const players = (view.players ?? []).map((player: any) => ({ ...player, isUser: player.id === authSession.user.id, hand: player.id === authSession.user.id ? view.hand ?? [] : [] })) as MatchPlayer[];
+          applyOnlineAuthorityView(view);
+          await finishMatch(players, 0, view);
+          return;
+        }
+        if (view.phase === "resolved" && authoritativeAnimationRoundRef.current !== Number(view.round)) {
+          authoritativeAnimationRoundRef.current = Number(view.round);
+          authoritativeAnimationBusyRef.current = true;
+          const revealed = (view.result?.revealed ?? []).map((entry: any) => ({ ...entry.card, value: entry.face_value }));
+          applyOnlineAuthorityView({ ...view, phase: "bidding", result: null });
+          setRevealedBids(revealed); setRevealedLoot(false); setResolutionStage("bids");
+          setResolutionWinnerIds([]); setRoundScoreChanges([]); setResolutionMessage("");
+          const sequence = ++resolutionRunRef.current;
+          scheduleGameTimeout(() => {
+            if (!active || sequence !== resolutionRunRef.current) { authoritativeAnimationBusyRef.current = false; return; }
+            setResolutionStage("loot"); setRevealedLoot(true); setLootEffect(view.result?.lootEffect ?? hiddenLootEffects[0]); playSfx("flip");
+            scheduleGameTimeout(() => {
+              if (!active || sequence !== resolutionRunRef.current) { authoritativeAnimationBusyRef.current = false; return; }
+              setResolutionStage("result"); setResolutionWinnerIds(view.result?.winnerIds ?? []); setRoundScoreChanges(view.result?.scoreChanges ?? []); setResolutionMessage(view.result?.message ?? "Ronda resuelta.");
+              if ((view.result?.winnerIds ?? []).includes(authSession.user.id)) playSfx("handWin"); else playSfx("handLose");
+              scheduleGameTimeout(async () => {
+                if (!active || sequence !== resolutionRunRef.current) { authoritativeAnimationBusyRef.current = false; return; }
+                try {
+                  const next = await invokeGameAuthority("advance", { matchId: onlineMatch.id });
+                  if (!active) return;
+                  if (next.status === "completed") {
+                    authoritativeMatchFinishedRef.current = true;
+                    const finalPlayers = (next.players ?? []).map((player: any) => ({ ...player, isUser: player.id === authSession.user.id, hand: player.id === authSession.user.id ? next.hand ?? [] : [] })) as MatchPlayer[];
+                    applyOnlineAuthorityView(next);
+                    await finishMatch(finalPlayers, 0, next);
+                  } else {
+                    applyOnlineAuthorityView(next); setResolutionStage("idle"); setRevealedBids(null); setRevealedLoot(false); setResolutionMessage(""); setOnlineSubmittedBids({}); playSfx("deal");
+                  }
+                } catch (error) {
+                  setAccountWalletMessage(error instanceof Error ? error.message : "No se pudo avanzar la ronda.");
+                } finally { authoritativeAnimationBusyRef.current = false; }
+              }, 2600);
+            }, 1300);
+          }, 1900);
+          return;
+        }
+        if (view.phase === "bidding" && !authoritativeAnimationBusyRef.current) applyOnlineAuthorityView(view);
+      } catch (error) {
+        if (active) setAccountWalletMessage(error instanceof Error ? error.message : "No se pudo sincronizar el estado de la partida.");
+      }
+    };
+    void poll();
+    const interval = window.setInterval(() => void poll(), 700);
+    return () => { active = false; window.clearInterval(interval); };
+  }, [onlineMatch?.id, authSession?.user.id, screen, page]);
 
   useEffect(() => {
     if (screen === "game" && page === "game" && resolutionStage === "idle" && turnSeconds === 0 && (!bidPlaced || Boolean(onlineMatch && authSession?.user.id === onlineMatch.hostId))) {
       const chosen = selected ?? Math.floor(Math.random() * Math.max(1, handValues.length));
-      if (onlineMatch && authSession?.user.id === onlineMatch.hostId && onlineRoomReady) {
-        const completedBids = { ...onlineSubmittedBids };
-        const ownBidMissing = completedBids[authSession.user.id] === undefined;
-        if (ownBidMissing) {
-          completedBids[authSession.user.id] = chosen;
-          void onlineGameChannelRef.current?.send({ type: "broadcast", event: "bid", payload: { match_id: onlineMatch.id, round, player_id: authSession.user.id, card_index: chosen, automatic: true } });
-        }
-        for (const player of onlineMatch.roster) {
-          if (completedBids[player.id] !== undefined) continue;
-          const hand = matchPlayers.find((entry) => entry.id === player.id)?.hand ?? [];
-          const fallbackIndex = Math.floor(Math.random() * Math.max(1, hand.length));
-          completedBids[player.id] = fallbackIndex;
-          void onlineGameChannelRef.current?.send({ type: "broadcast", event: "bid", payload: { match_id: onlineMatch.id, round, player_id: player.id, card_index: fallbackIndex, automatic: true } });
-        }
-        if (!ownBidMissing && Object.keys(completedBids).length === Object.keys(onlineSubmittedBids).length) return;
-        setOnlineSubmittedBids(completedBids);
-        setSelected(chosen);
-        setBidPlaced(true);
-        if (ownBidMissing) commitProfile(advanceMission(profileRef.current, "bids"));
+      if (onlineMatch) {
+        void invokeGameAuthority("timeout", { matchId: onlineMatch.id, round }).then((view) => {
+          if (view.phase === "resolved") return;
+          applyOnlineAuthorityView(view);
+        }).catch(() => {});
       } else placeBid(chosen);
     }
-  }, [screen, page, turnSeconds, bidPlaced, selected, onlineMatch?.id, onlineSubmittedBids, onlineRoomReady, matchPlayers, resolutionStage]);
+  }, [screen, page, turnSeconds, bidPlaced, selected, onlineMatch?.id, round, handValues.length, resolutionStage]);
 
   if (!authBootComplete || !authSession) {
     return (
@@ -2828,14 +3031,9 @@ export default function App() {
 
   if (screen !== "game" && page === "game") {
     const modeTitles: Record<GameMode, string> = { classic: "4P CLÁSICO", teams: "EQUIPOS 2v2", duel: "DUELO 1v1" };
-    const selectedRanking = rankingPeriod === "total" ? profile.winsByMode[rankingMode] : profile.winsByPeriod[rankingPeriod][rankingMode];
     const rankingResetAt = rankingPeriod === "weekly" ? profile.winsPeriodResetAt.weekly : profile.winsPeriodResetAt.monthly;
     const rankingPeriodStatus = rankingPeriod === "total" ? "Este ranking no se reinicia nunca." : `Se reinicia en ${formatPeriodRemaining(rankingResetAt - serviceNow)}.`;
-    const rankingRows = Object.entries(selectedRanking)
-      .map(([id, wins]) => ({ id, name: id === "player" ? profile.name : id, wins, color: id === "player" ? "#42bfd0" : opponents.find((opponent) => opponent.name === id)?.color ?? "#7454c7" }))
-      .filter((player) => player.wins > 0)
-      .sort((a, b) => b.wins - a.wins || a.name.localeCompare(b.name))
-      .slice(0, 50);
+    const rankingRows = globalRankingRows;
     const nameCooldownMs = 30 * 24 * 60 * 60 * 1000;
     const nameCooldownLeft = Math.max(0, nameCooldownMs - (Date.now() - profile.lastNameChange));
     const renameGems = authSession ? (accountWallet?.gems ?? 0) : profile.gems;
@@ -2958,7 +3156,7 @@ export default function App() {
               <span className="menu-section-kicker">VICTORIAS POR PERIODO</span><h1>RANKING VICTORIAS</h1>
               <div className="ranking-period-tabs">{(["weekly", "monthly", "total"] as RankingPeriod[]).map((period) => <button key={period} className={rankingPeriod === period ? "active" : ""} onClick={() => { setRankingPeriod(period); playSfx("click"); }}>{period === "weekly" ? "SEMANAL" : period === "monthly" ? "MENSUAL" : "TOTAL"}</button>)}</div>
               <div className="ranking-tabs">{(["classic", "teams", "duel"] as GameMode[]).map((mode) => <button className={rankingMode === mode ? "active" : ""} key={mode} onClick={() => { playSfx("click"); setRankingMode(mode); }}>{modeTitles[mode]}</button>)}</div>
-              <div className="ranking-list">{rankingRows.length ? rankingRows.map((player, index) => <div className={`ranking-row rank-${index + 1}`} key={player.id}><b className="ranking-place">{String(index + 1).padStart(2, "0")}</b><span className={`ranking-avatar ${player.id === "player" ? "player-ranking-avatar" : ""}`} style={player.id === "player" ? { "--avatar-fill": profile.equippedAvatarColor } as React.CSSProperties : { background: player.color }}>{player.id === "player" ? <AvatarFace avatar={profile.avatar} /> : "✦"}</span><strong>{player.name}</strong><em>{player.wins} {player.wins === 1 ? "victoria" : "victorias"}</em></div>) : <p className="ranking-empty">Aún no hay victorias en este modo. ¡Juega para entrar en el Top 50!</p>}</div>
+              <div className="ranking-list">{rankingRows.length ? rankingRows.map((player, index) => <div className={`ranking-row rank-${index + 1}`} key={player.id}><b className="ranking-place">{String(index + 1).padStart(2, "0")}</b><span className="ranking-avatar" style={{ background: player.color }}><AvatarFace avatar={player.avatar} /></span><strong>{player.name}</strong><em>{player.wins} {player.wins === 1 ? "victoria" : "victorias"}</em></div>) : <p className="ranking-empty">{globalRankingLoading ? "Cargando ranking…" : "Aún no hay victorias online en este modo. ¡Juega para entrar en el Top 50!"}</p>}</div>
               <p className="menu-footnote">{rankingPeriod === "weekly" ? "Semanal" : rankingPeriod === "monthly" ? "Mensual" : "Histórico total"} · {modeTitles[rankingMode]} · Top 50 · solo jugadores con victorias · {rankingPeriodStatus}</p>
             </>}
             {screen === "season-ranking" && <>
@@ -2966,8 +3164,8 @@ export default function App() {
               <p className="season-ranking-intro">Tres progresiones independientes. Tus victorias de este mes suben el rango de cada modalidad; al cierre de temporada se entregan las recompensas y el progreso mensual se reinicia.</p>
               <div className="ranking-tabs">{(["classic", "teams", "duel"] as GameMode[]).map((mode) => <button className={rankingMode === mode ? "active" : ""} key={mode} onClick={() => { playSfx("click"); setRankingMode(mode); }}>{modeTitles[mode]}</button>)}</div>
               {(() => {
-                const monthlyRows = Object.entries(profile.winsByPeriod.monthly[rankingMode]).map(([id, wins]) => ({ id, name: id === "player" ? profile.name : id, wins, color: id === "player" ? "#42bfd0" : opponents.find((opponent) => opponent.name === id)?.color ?? "#7454c7" })).filter((row) => row.wins > 0).sort((a, b) => b.wins - a.wins || a.name.localeCompare(b.name)).slice(0, 50);
-                return <div className="season-rank-list">{monthlyRows.length ? monthlyRows.map((row, index) => { const rank = rankForWins(row.wins); return <div className={`season-rank-row ${row.id === "player" ? "is-player" : ""}`} key={row.id}><b className="ranking-place">{String(index + 1).padStart(2, "0")}</b><span className={`ranking-avatar ${row.id === "player" ? "player-ranking-avatar" : ""}`} style={row.id === "player" ? { "--avatar-fill": profile.equippedAvatarColor } as React.CSSProperties : { background: row.color }}>{row.id === "player" ? <AvatarFace avatar={profile.avatar} /> : "✦"}</span><img className="season-rank-badge" src={rankBadgeUrl(rank.asset)} alt="" /><strong>{row.name}<small>{rank.name} · fin de mes: +{rank.coins} 🪙 / +{rank.gems} 💎</small></strong><em>{row.wins} {row.wins === 1 ? "victoria" : "victorias"}</em></div>; }) : <p className="ranking-empty">Aún no hay victorias esta temporada en {modeTitles[rankingMode]}.</p>}</div>;
+                const monthlyRows = globalRankingRows;
+                return <div className="season-rank-list">{monthlyRows.length ? monthlyRows.map((row, index) => { const rank = rankForWins(row.wins); return <div className="season-rank-row" key={row.id}><b className="ranking-place">{String(index + 1).padStart(2, "0")}</b><span className="ranking-avatar" style={{ background: row.color }}><AvatarFace avatar={row.avatar} /></span><img className="season-rank-badge" src={rankBadgeUrl(rank.asset)} alt="" /><strong>{row.name}<small>{rank.name} · fin de mes: +{rank.coins} 🪙 / +{rank.gems} 💎</small></strong><em>{row.wins} {row.wins === 1 ? "victoria" : "victorias"}</em></div>; }) : <p className="ranking-empty">{globalRankingLoading ? "Cargando ranking…" : `Aún no hay victorias esta temporada en ${modeTitles[rankingMode]}.`}</p>}</div>;
               })()}
               <p className="menu-footnote">Rangos mensuales separados por modalidad · Las recompensas se calculan al cerrar el mes.</p>
             </>}
@@ -3225,7 +3423,7 @@ export default function App() {
         </div>
       </section>
 
-      {matchResult && <div className="match-end-overlay"><section className="match-end-panel"><span className="menu-section-kicker">{gameMode === "teams" ? "EQUIPOS 2v2" : gameMode === "duel" ? "DUELO 1v1" : "CLÁSICO 4P"} · PARTIDA COMPLETADA</span><h2>{matchResult.title}</h2><p>{matchResult.winner}</p><div className="match-end-rows">{matchResult.rows.map((row, index) => <div key={`${row.name}-${index}`}><span>{index + 1}. {row.name}</span><strong>{Math.floor(row.score)} pts</strong></div>)}</div><div className="match-reward-line">RECOMPENSAS: +{matchResult.coinReward} 🪙 {matchResult.gemReward > 0 ? `· +${matchResult.gemReward} 💎` : ""}</div>{matchResult.eventBonus && <div className="match-event-reward">EVENTO APLICADO · {matchResult.eventBonus}</div>}<div className="match-chest-reward">{matchResult.chestAdded ? "🎁 ¡Has conseguido un cofre!" : matchResult.matchWon ? "🎁 Ya tienes 3 cofres guardados: abre uno para conseguir el siguiente." : "🎁 El cofre de partida es para quien gana."}</div><button className="play-now-button" onClick={() => { const online = Boolean(onlineMatch); setMatchResult(null); setOnlineMatch(null); setOnlineSubmittedBids({}); setPage("game"); setScreen(online ? "online-modes" : "modes"); }}>JUGAR OTRA PARTIDA <b>›</b></button><button className="menu-back-link" onClick={() => { setMatchResult(null); setOnlineMatch(null); setOnlineSubmittedBids({}); setPage("game"); setScreen("menu"); }}>VOLVER AL MENÚ</button></section></div>}
+      {matchResult && <div className="match-end-overlay"><section className="match-end-panel"><span className="menu-section-kicker">{gameMode === "teams" ? "EQUIPOS 2v2" : gameMode === "duel" ? "DUELO 1v1" : "CLÁSICO 4P"} · PARTIDA COMPLETADA</span><h2>{matchResult.title}</h2><p>{matchResult.winner}</p><div className="match-end-rows">{matchResult.rows.map((row, index) => <div key={`${row.name}-${index}`}><span>{index + 1}. {row.name}</span><strong>{Math.floor(row.score)} pts</strong></div>)}</div><div className="match-reward-line">RECOMPENSAS: +{matchResult.coinReward} 🪙 {matchResult.gemReward > 0 ? `· +${matchResult.gemReward} 💎` : ""}</div>{matchResult.eventBonus && <div className="match-event-reward">EVENTO APLICADO · {matchResult.eventBonus}</div>}<div className="match-chest-reward">{matchResult.chestAdded ? "🎁 ¡Has conseguido un cofre!" : matchResult.matchWon ? "🎁 Ya tienes 3 cofres guardados: abre uno para conseguir el siguiente." : "🎁 El cofre de partida es para quien gana."}</div><button className="play-now-button" onClick={() => { const online = Boolean(onlineMatch?.isOnline); setMatchResult(null); setOnlineMatch(null); setOnlineSubmittedBids({}); setPage("game"); setScreen(online ? "online-modes" : "modes"); }}>JUGAR OTRA PARTIDA <b>›</b></button><button className="menu-back-link" onClick={() => { setMatchResult(null); setOnlineMatch(null); setOnlineSubmittedBids({}); setPage("game"); setScreen("menu"); }}>VOLVER AL MENÚ</button></section></div>}
 
       <section className="hand-zone" aria-label="Tu mano">
         <div className="hand">
