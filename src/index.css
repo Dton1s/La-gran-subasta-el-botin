@@ -3902,3 +3902,24 @@ canvas { display:block;width:100%;height:100%;object-fit:contain; }
   .round-score-chips .round-result-avatar > .avatar-basic-emoji,
   .round-score-chips .round-result-avatar > .avatar-art-fallback { position:relative!important;inset:auto!important;display:grid;width:100%;height:100%;place-items:center;font-size:16px;line-height:1; }
 }
+
+/* Center built-in emoji avatars consistently inside the square frame. */
+.cosmetic-avatar-preview .avatar-basic-emoji,
+.cosmetic-avatar-preview .avatar-art-fallback { inset:8px!important;display:grid!important;place-items:center!important;width:auto!important;height:auto!important;font-size:29px!important;line-height:1!important;transform:none!important; }
+.menu-avatar-frame:not(.large) .avatar-basic-emoji,
+.menu-avatar-frame:not(.large) .avatar-art-fallback { inset:7px!important;display:grid!important;place-items:center!important;width:auto!important;height:auto!important;font-size:23px!important;line-height:1!important;transform:none!important; }
+.menu-avatar-frame.large .avatar-basic-emoji,
+.menu-avatar-frame.large .avatar-art-fallback { inset:9px!important;display:grid!important;place-items:center!important;width:auto!important;height:auto!important;font-size:35px!important;line-height:1!important;transform:none!important; }
+.game-player-avatar .avatar-basic-emoji,
+.game-player-avatar .avatar-art-fallback { inset:4px!important;display:grid!important;place-items:center!important;width:auto!important;height:auto!important;font-size:22px!important;line-height:1!important;transform:none!important; }
+.social-player-avatar .avatar-basic-emoji,.ranking-avatar .avatar-basic-emoji { display:grid;place-items:center;width:100%;height:100%;font-size:17px;line-height:1; }
+.bid-player-avatar.user-bid-avatar .avatar-basic-emoji { inset:1px!important;display:grid;place-items:center;width:auto!important;height:auto!important;font-size:16px!important;line-height:1; }
+.round-score-chips .round-result-avatar .avatar-basic-emoji { display:grid;place-items:center;width:100%;height:100%;font-size:13px;line-height:1; }
+@media (orientation:landscape) and (max-width:1024px) and (max-height:520px) {
+  .cosmetic-avatar-preview .avatar-basic-emoji,.cosmetic-avatar-preview .avatar-art-fallback { font-size:20px!important; }
+  .menu-avatar-frame:not(.large) .avatar-basic-emoji,.menu-avatar-frame:not(.large) .avatar-art-fallback { font-size:17px!important; }
+  .menu-avatar-frame.large .avatar-basic-emoji,.menu-avatar-frame.large .avatar-art-fallback { font-size:26px!important; }
+  .game-player-avatar .avatar-basic-emoji,.game-player-avatar .avatar-art-fallback { font-size:16px!important; }
+  .bid-player-avatar.user-bid-avatar .avatar-basic-emoji { font-size:12px!important; }
+  .social-player-avatar .avatar-basic-emoji,.ranking-avatar .avatar-basic-emoji { font-size:14px; }
+}

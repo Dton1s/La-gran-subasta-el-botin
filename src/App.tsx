@@ -1244,16 +1244,16 @@ export default function App() {
   const [matchResult, setMatchResult] = useState<{ title: string; winner: string; rows: { name: string; score: number }[]; coinReward: number; gemReward: number; eventBonus?: string; chestAdded: boolean; matchWon: boolean } | null>(null);
   const [profile, setProfile] = useState(readPlayerProfile);
   const profileRef = useRef(profile);
-  const wallet = { coins: profile.coins, gems: profile.gems };
   const [accountWallet, setAccountWallet] = useState<{ coins: number; gems: number } | null>(null);
   const [accountWalletLoading, setAccountWalletLoading] = useState(false);
   const [accountWalletMessage, setAccountWalletMessage] = useState("");
   const accountWalletRefreshRef = useRef<() => Promise<void>>(async () => {});
+  const walletMutationQueueRef = useRef<Promise<void>>(Promise.resolve());
+  const wallet = accountWallet ?? { coins: profile.coins, gems: profile.gems };
   const [profileNameDraft, setProfileNameDraft] = useState(profile.name);
   const [profileMessage, setProfileMessage] = useState("");
   const [authSession, setAuthSession] = useState<Session | null>(null);
   const authUserIdRef = useRef<string | null>(null);
-  const [localPreview, setLocalPreview] = useState(false);
   const [authBootComplete, setAuthBootComplete] = useState(false);
   const [authMode, setAuthMode] = useState<"login" | "register">("login");
   const [authEmail, setAuthEmail] = useState("");
@@ -1547,6 +1547,8 @@ export default function App() {
         // Keep the resolved username state across those events; otherwise the
         // app shows onboarding again without reloading the profile.
         if (userChanged) {
+          setAccountWallet(null);
+          setAccountWalletLoading(true);
           setUsernameChecked(false);
           setUsernameRequired(false);
           setUsernameMessage("");
@@ -1581,6 +1583,8 @@ export default function App() {
     if (!supabase || !authSession) return;
     let active = true;
     const userId = authSession.user.id;
+    setAccountWallet(null);
+    setAccountWalletLoading(true);
     const accountProfile = readPlayerProfile(userId);
     profileRef.current = accountProfile;
     setProfile(accountProfile);
@@ -1628,7 +1632,15 @@ export default function App() {
           setAccountWallet(null);
           setAccountWalletMessage("La cuenta todavía no tiene un monedero inicializado.");
         } else {
-          setAccountWallet({ coins: Math.max(0, Number(data.coins) || 0), gems: Math.max(0, Number(data.gems) || 0) });
+          const balance = { coins: Math.max(0, Number(data.coins) || 0), gems: Math.max(0, Number(data.gems) || 0) };
+          setAccountWallet(balance);
+          const current = profileRef.current;
+          if (current.coins !== balance.coins || current.gems !== balance.gems) {
+            const synchronized = { ...current, ...balance };
+            profileRef.current = synchronized;
+            setProfile(synchronized);
+            savePlayerProfile(synchronized, userId);
+          }
           setAccountWalletMessage("");
         }
         setAccountWalletLoading(false);
@@ -1653,11 +1665,6 @@ export default function App() {
 
   useEffect(() => {
     if (!authBootComplete) return;
-    if (localPreview) {
-      setPage("game");
-      setScreen((current) => current === "auth" ? "menu" : current);
-      return;
-    }
     if (authSession) {
       if (!usernameChecked || usernameRequired) return;
       setPage("game");
@@ -1669,7 +1676,7 @@ export default function App() {
       setPanel(null);
       setHomeUtilityPanel(null);
     }
-  }, [authSession?.user.id, authBootComplete, usernameChecked, usernameRequired, localPreview]);
+  }, [authSession?.user.id, authBootComplete, usernameChecked, usernameRequired]);
 
   useEffect(() => {
     const music = new Audio(publicAsset("sigma/audio/Raise_or_Fold_loop.ogg"));
@@ -1775,12 +1782,46 @@ export default function App() {
 
   const commitProfile = (next: PlayerProfile) => {
     const previous = profileRef.current;
+    const hasWallet = accountWallet !== null;
+    const coinDelta = hasWallet ? Math.trunc(next.coins - previous.coins) : 0;
+    const gemDelta = hasWallet ? Math.trunc(next.gems - previous.gems) : 0;
+    if ((coinDelta !== 0 || gemDelta !== 0) && (!supabase || !authSession)) {
+      setAccountWalletMessage("Inicia sesión para usar y guardar monedas o gemas en tu monedero de cuenta.");
+      return;
+    }
+    if (!hasWallet) next = { ...next, coins: previous.coins, gems: previous.gems };
     profileRef.current = next;
     setProfile(next);
-    savePlayerProfile(next, localPreview ? "local-preview" : authSession?.user.id);
+    savePlayerProfile(next, authSession?.user.id);
     if (supabase && authSession && (next.name !== previous.name || next.avatar !== previous.avatar)) {
       void supabase.from("profiles").update({ display_name: next.name, avatar_id: next.avatar }).eq("id", authSession.user.id).then(({ error }) => {
         if (error) setAuthMessage("Cambios guardados localmente, pero no se sincronizó el perfil remoto.");
+      });
+    }
+    if ((coinDelta !== 0 || gemDelta !== 0) && supabase && authSession) {
+      const client = supabase;
+      const requestId = crypto.randomUUID();
+      walletMutationQueueRef.current = walletMutationQueueRef.current.then(async () => {
+        const { data, error } = await client.rpc("apply_game_wallet_delta", {
+          p_coins_delta: coinDelta,
+          p_gems_delta: gemDelta,
+          p_request_id: requestId,
+        });
+        if (error) throw error;
+        const row = Array.isArray(data) ? data[0] : data;
+        if (row && Number.isFinite(Number(row.coins)) && Number.isFinite(Number(row.gems))) {
+          const balance = { coins: Math.max(0, Number(row.coins)), gems: Math.max(0, Number(row.gems)) };
+          setAccountWallet(balance);
+          const latest = profileRef.current;
+          const synchronized = { ...latest, ...balance };
+          profileRef.current = synchronized;
+          setProfile(synchronized);
+          savePlayerProfile(synchronized, authSession.user.id);
+          setAccountWalletMessage("");
+        } else await accountWalletRefreshRef.current();
+      }).catch(async (error: unknown) => {
+        setAccountWalletMessage(error instanceof Error ? `No se pudo actualizar el monedero: ${error.message}` : "No se pudo actualizar el monedero de cuenta.");
+        await accountWalletRefreshRef.current();
       });
     }
   };
@@ -1946,7 +1987,7 @@ export default function App() {
     setAuthBusy(true);
     try {
       const { error } = await supabase.auth.signOut();
-      setAuthMessage(error ? error.message : "Sesión cerrada. Tu partida local sigue guardada en este navegador.");
+      setAuthMessage(error ? error.message : "Sesión cerrada.");
     } catch (error) {
       setAuthMessage(error instanceof Error ? error.message : "No se pudo cerrar la sesión.");
     } finally {
@@ -2020,21 +2061,6 @@ export default function App() {
   };
 
   useEffect(() => {
-    const giftKey = "sigmaLocalStoreTestGiftV1";
-    if (!import.meta.env.DEV || localStorage.getItem(giftKey)) return;
-    localStorage.setItem(giftKey, "claimed");
-    commitProfile({ ...profileRef.current, coins: profileRef.current.coins + 5000, gems: profileRef.current.gems + 500 });
-  }, []);
-
-  useEffect(() => {
-    const grantKey = "sigmaAvatarCosmeticsTestGrantV1";
-    if (!import.meta.env.DEV || localStorage.getItem(grantKey)) return;
-    localStorage.setItem(grantKey, "claimed");
-    const current = profileRef.current;
-    commitProfile({ ...current, coins: Math.max(current.coins, 9999), gems: Math.max(current.gems, 99999) });
-  }, []);
-
-  useEffect(() => {
     try {
       const reward = JSON.parse(sessionStorage.getItem("sigmaSeasonRewardNotice") || "null");
       if (reward && (reward.coins > 0 || reward.gems > 0)) setProfileMessage(`Recompensa de la temporada anterior: +${reward.coins} monedas · +${reward.gems} gemas.`);
@@ -2071,7 +2097,7 @@ export default function App() {
 
   const purchaseDeck = (id: string) => {
     const card = inventoryCards.find((entry) => entry.cardKey === id);
-    if (!card || profile.ownedCards.includes(id) || profile.coins < card.cardPrice) return;
+    if (!card || profile.ownedCards.includes(id) || wallet.coins < card.cardPrice) return;
     commitProfile({ ...profile, coins: profile.coins - card.cardPrice, ownedCards: [...profile.ownedCards, id] });
     playSfx("handWin");
   };
@@ -2160,7 +2186,7 @@ export default function App() {
   };
 
   const startMatch = (mode: GameMode) => {
-    if (!authSession && !localPreview) { setScreen("auth"); return; }
+    if (!authSession || !accountWallet) { setScreen("auth"); return; }
     setOnlineMatch(null);
     setOnlineSubmittedBids({});
     setOnlineRoomReady(false);
@@ -2290,7 +2316,7 @@ export default function App() {
   };
 
   const joinOnlineQueue = (mode: GameMode) => {
-    if (!supabase || !authSession || !usernameChecked || profile.coins < MATCH_ENTRY_FEE) return;
+    if (!supabase || !authSession || !usernameChecked || !accountWallet || accountWallet.coins < MATCH_ENTRY_FEE) return;
     setOnlineMatch(null);
     cancelOnlineQueue();
     setOnlineQueueMode(mode);
@@ -2716,11 +2742,10 @@ export default function App() {
     }
   }, [screen, page, turnSeconds, bidPlaced, selected, onlineMatch?.id, onlineSubmittedBids, onlineRoomReady, matchPlayers, resolutionStage]);
 
-  if (!authBootComplete || (!authSession && !localPreview)) {
+  if (!authBootComplete || !authSession) {
     return (
       <main className="game-shell start-screen auth-start-screen">
         {fullscreenButton()}
-        {import.meta.env.DEV && <button type="button" className="local-preview-button" onClick={() => { const preview = readPlayerProfile("local-preview"); const next = { ...preview, name: "PruebaLocal", coins: Math.max(1000, preview.coins), gems: Math.max(1000, preview.gems) }; profileRef.current = next; setProfile(next); setProfileNameDraft(next.name); setLocalPreview(true); setAuthBootComplete(true); setUsernameChecked(true); setScreen("menu"); }}>ENTRAR EN MODO PRUEBA</button>}
         <div className="ambient ambient-one" />
         <div className="ambient ambient-two" />
         <div className="menu-coin-spark spark-a">✦</div><div className="menu-coin-spark spark-b">✧</div>
@@ -2747,7 +2772,7 @@ export default function App() {
     );
   }
 
-  if (!localPreview && (!usernameChecked || usernameRequired)) {
+  if (!usernameChecked || usernameRequired) {
     return (
       <main className="game-shell start-screen auth-start-screen">
         {fullscreenButton()}
@@ -2765,6 +2790,20 @@ export default function App() {
             {usernameMessage && <p className={`account-feedback ${usernameMessage.includes("disponible") ? "success" : "error"}`} role="status">{usernameMessage}</p>}
             {!supabaseConfigured && <p className="account-feedback error">El servicio de perfiles no está configurado.</p>}
           </section>
+        </section>
+      </main>
+    );
+  }
+
+  if (authSession && !accountWallet) {
+    return (
+      <main className="game-shell start-screen auth-start-screen">
+        {fullscreenButton()}
+        <section className="account-panel auth-entry-card" role="status" aria-live="polite">
+          <div className="account-panel-heading"><span><small>CUENTA VINCULADA</small><strong>{accountWalletLoading ? "CARGANDO MONEDERO" : "MONEDERO NO DISPONIBLE"}</strong></span></div>
+          <p className="account-status">El juego usa un único saldo de cuenta para las partidas contra IA y las partidas online. Conecta con el servidor para continuar.</p>
+          {accountWalletMessage && <p className="account-feedback" role="alert">{accountWalletMessage}</p>}
+          <button className="account-submit" type="button" onClick={() => void accountWalletRefreshRef.current()} disabled={accountWalletLoading}>{accountWalletLoading ? "CARGANDO…" : "REINTENTAR CONEXIÓN"}</button>
         </section>
       </main>
     );
@@ -2820,7 +2859,7 @@ export default function App() {
             <p className="menu-tagline">La mesa está lista. ¿Te atreves a pujar?</p>
             <div className="play-mode-actions">
               <button className="play-now-button play-offline-button" onClick={() => { playSfx("click"); setScreen("modes"); }}><span className="play-icon">▶</span><span><strong>JUGAR OFFLINE</strong><small>CON RIVALES IA</small></span><b>›</b></button>
-              <button className="play-now-button play-online-button" disabled={localPreview} title={localPreview ? "El modo online requiere una cuenta" : undefined} onClick={() => { playSfx("click"); setOnlineQueueMessage(""); setScreen("online-modes"); }}><span className="play-icon">🌐</span><span><strong>JUGAR ONLINE</strong><small>{localPreview ? "REQUIERE CUENTA" : "BUSCAR JUGADORES"}</small></span><b>›</b></button>
+              <button className="play-now-button play-online-button" disabled={!accountWallet} onClick={() => { playSfx("click"); setOnlineQueueMessage(""); setScreen("online-modes"); }}><span className="play-icon">🌐</span><span><strong>JUGAR ONLINE</strong><small>{accountWallet ? "BUSCAR JUGADORES" : "CARGANDO SALDO…"}</small></span><b>›</b></button>
             </div>
             <div className="menu-shortcuts main-menu-shortcuts">
               <button onClick={() => goTo("season-ranking")}><img className="menu-option-icon rank-shortcut-icon" src={rankBadgeUrl("badge_gold_01.png")} alt="" /><span>RANKING DE RANGOS</span></button>
@@ -2834,25 +2873,25 @@ export default function App() {
           </section>
           <button className="rules-info-button" onClick={() => { playSfx("click"); setRulesOpen(true); }} aria-label="Cómo se juega"><span>i</span><strong>¿CÓMO SE JUEGA?</strong></button>
           <nav className="home-quick-rail" aria-label="Accesos de temporada">
-            <button className="home-quick-button friends-quick-button" disabled={localPreview} title={localPreview ? "Los amigos requieren una cuenta" : undefined} onClick={() => goTo("social")} aria-label="Amigos y grupos"><span className="home-quick-icon">👥</span><strong>AMIGOS</strong><i>{friendProfiles.length}</i></button>
+            <button className="home-quick-button friends-quick-button" onClick={() => goTo("social")} aria-label="Amigos y grupos"><span className="home-quick-icon">👥</span><strong>AMIGOS</strong><i>{friendProfiles.length}</i></button>
             <button className={`home-quick-button event-quick-button ${homeUtilityPanel === "events" ? "active" : ""}`} onClick={() => { playSfx("click"); setHomeUtilityPanel((open) => open === "events" ? null : "events"); }} aria-expanded={homeUtilityPanel === "events"} aria-label="Ver eventos activos"><span className="home-quick-icon">🎉</span><strong>EVENTOS</strong><i>{activeMenuEvents.length}</i></button>
             <button className={`home-quick-button chest-quick-button ${homeUtilityPanel === "chests" ? "active" : ""}`} onClick={() => { playSfx("click"); setHomeUtilityPanel((open) => open === "chests" ? null : "chests"); }} aria-expanded={homeUtilityPanel === "chests"} aria-label={`Ver cofres, ${profile.chests.length} de ${MAX_CHESTS}`}><span className="home-quick-icon"><GameIcon name="chest" size={29} /></span><strong>COFRES</strong><i>{profile.chests.length}/{MAX_CHESTS}</i></button>
           </nav>
           {homeUtilityPanel && <aside className={`home-utility-panel ${homeUtilityPanel}`} aria-label={homeUtilityPanel === "events" ? "Eventos activos" : "Cofres de subasta"}>
             <header><div><span>{homeUtilityPanel === "events" ? "LA MESA ESTÁ EN MOVIMIENTO" : "PREMIOS POR PARTIDA"}</span><strong>{homeUtilityPanel === "events" ? "EVENTOS ACTIVOS" : `COFRES · ${profile.chests.length}/${MAX_CHESTS}`}</strong></div><button onClick={() => setHomeUtilityPanel(null)} aria-label="Cerrar panel">×</button></header>
-            {homeUtilityPanel === "events" ? <><div className="home-event-list">{activeMenuEvents.map((event) => { const hours = Math.max(1, Math.ceil((event.endsAt - serviceNow) / 3_600_000)); return <button className="home-event-card" key={event.id} onClick={() => { playSfx("click"); setHomeUtilityPanel(null); setScreen("modes"); }}><span className="home-event-icon">{event.icon}</span><span className="home-event-copy"><small>{event.period} · {hours < 24 ? `${hours} H` : `${Math.ceil(hours / 24)} D`}</small><strong>{event.title}</strong><em>{event.description}</em></span><b className="home-event-reward">{event.rewardText}</b></button>; })}</div><small className="home-utility-footnote">Los eventos se renuevan automáticamente y sus bonus se aplican al ganar.</small></> : <><header className="home-chest-panel-subheader"><span>ESPACIO DE COFRES</span><b>{profile.chests.length}/{MAX_CHESTS}</b></header>{profile.chests.length ? <div className="home-chest-list">{profile.chests.map((chest, index) => { const ready = serviceNow >= chest.readyAt; return <article className={`home-chest-card ${ready ? "ready" : "waiting"}`} key={chest.id}><GameIcon name="chest" size={32} /><span><strong>COFRE {index + 1}</strong><small>{ready ? "LISTO PARA ABRIR" : `EN ${formatCountdown(chest.readyAt - serviceNow)}`}</small></span><button disabled={!ready && profile.gems < CHEST_SKIP_GEMS} onClick={() => openChest(chest.id, !ready)}>{ready ? "ABRIR" : profile.gems >= CHEST_SKIP_GEMS ? `ABRIR · ${CHEST_SKIP_GEMS} 💎` : "ESPERAR"}</button></article>; })}</div> : <div className="home-chest-empty"><GameIcon name="chest" size={36} /><span>Completa una partida para conseguir tu primer cofre.</span></div>}{chestNotice && <p className="home-chest-notice" role="status">{chestNotice}</p>}<small className="home-utility-footnote">Apertura gratis tras 10 min · instantánea: {CHEST_SKIP_GEMS} 💎 · 15 💎: 5% · 30 💎: 2% · 60 💎: 0,5% · cosmético raro: 0,1%</small></>}
+            {homeUtilityPanel === "events" ? <><div className="home-event-list">{activeMenuEvents.map((event) => { const hours = Math.max(1, Math.ceil((event.endsAt - serviceNow) / 3_600_000)); return <button className="home-event-card" key={event.id} onClick={() => { playSfx("click"); setHomeUtilityPanel(null); setScreen("modes"); }}><span className="home-event-icon">{event.icon}</span><span className="home-event-copy"><small>{event.period} · {hours < 24 ? `${hours} H` : `${Math.ceil(hours / 24)} D`}</small><strong>{event.title}</strong><em>{event.description}</em></span><b className="home-event-reward">{event.rewardText}</b></button>; })}</div><small className="home-utility-footnote">Los eventos se renuevan automáticamente y sus bonus se aplican al ganar.</small></> : <><header className="home-chest-panel-subheader"><span>ESPACIO DE COFRES</span><b>{profile.chests.length}/{MAX_CHESTS}</b></header>{profile.chests.length ? <div className="home-chest-list">{profile.chests.map((chest, index) => { const ready = serviceNow >= chest.readyAt; return <article className={`home-chest-card ${ready ? "ready" : "waiting"}`} key={chest.id}><GameIcon name="chest" size={32} /><span><strong>COFRE {index + 1}</strong><small>{ready ? "LISTO PARA ABRIR" : `EN ${formatCountdown(chest.readyAt - serviceNow)}`}</small></span><button disabled={!ready && wallet.gems < CHEST_SKIP_GEMS} onClick={() => openChest(chest.id, !ready)}>{ready ? "ABRIR" : wallet.gems >= CHEST_SKIP_GEMS ? `ABRIR · ${CHEST_SKIP_GEMS} 💎` : "ESPERAR"}</button></article>; })}</div> : <div className="home-chest-empty"><GameIcon name="chest" size={36} /><span>Completa una partida para conseguir tu primer cofre.</span></div>}{chestNotice && <p className="home-chest-notice" role="status">{chestNotice}</p>}<small className="home-utility-footnote">Apertura gratis tras 10 min · instantánea: {CHEST_SKIP_GEMS} 💎 · 15 💎: 5% · 30 💎: 2% · 60 💎: 0,5% · cosmético raro: 0,1%</small></>}
           </aside>}
           {rulesOpen && <div className="rules-modal-backdrop" onClick={() => setRulesOpen(false)}><section className="rules-modal" role="dialog" aria-modal="true" aria-labelledby="rules-modal-title" onClick={(event) => event.stopPropagation()}><button className="rules-modal-close" onClick={() => setRulesOpen(false)} aria-label="Cerrar reglas">×</button><span className="menu-section-kicker">GUÍA DE LA SUBASTA</span><h2 id="rules-modal-title">CÓMO SE JUEGA</h2><p className="rules-modal-intro">Elige bien cuándo gastar tus cartas: cada ronda cambia el criterio para ganar.</p><div className="rules-mode-grid"><article><strong>CLÁSICO 4P</strong><span>10 rondas · 4 jugadores</span></article><article><strong>EQUIPOS 2v2</strong><span>8 rondas · suma de pujas por equipo</span></article><article><strong>DUELO 1v1</strong><span>5 rondas · cara a cara</span></article></div><ol className="rules-modal-steps"><li><b>1</b><span>Al entrar pagas una entrada de {MATCH_ENTRY_FEE} monedas y recibes una mano de 5 cartas.</span></li><li><b>2</b><span>Tienes 30 segundos para elegir una carta. La regla de la ronda aparece antes de pujar: puede ganar la puja más alta, la más baja, la más cercana al 5 o la carta par más alta.</span></li><li><b>3</b><span>Todos revelan a la vez. La carta jugada se consume y las pasivas individuales y de set se aplican según su descripción.</span></li><li><b>4</b><span>El ganador recibe el botín central. Si hay empate, se divide en puntos enteros y el sobrante va a la banca. La carta sorpresa puede cambiar el valor del botín o aplicar un efecto.</span></li><li><b>5</b><span>Al terminar la partida recibes monedas según el modo y el resultado. Solo quien gana obtiene un cofre; puede abrirse tras 10 minutos o al instante por 25 gemas.</span></li></ol><button className="play-now-button rules-modal-action" onClick={() => setRulesOpen(false)}>¡ENTENDIDO!</button></section></div>}
         </> : screen === "online-modes" ? (
           <section className="menu-subpanel modes-panel online-modes-panel">
             <button className="menu-back-link" onClick={() => { cancelOnlineQueue(); goTo("menu"); }}>‹ VOLVER AL MENÚ</button>
             <span className="menu-section-kicker">MESA MULTIJUGADOR · EN DIRECTO</span><h1>JUGAR ONLINE</h1>
-            <p className="entry-fee-note">Emparejamiento en tiempo real · entrada: <strong>{MATCH_ENTRY_FEE} monedas</strong> · saldo: {profile.coins} 🪙</p>
+            <p className="entry-fee-note">Emparejamiento en tiempo real · entrada: <strong>{MATCH_ENTRY_FEE} monedas</strong> · saldo de cuenta: {wallet.coins} 🪙</p>
             {partyId && <div className="online-party-summary"><span>🤝</span><div><strong>GRUPO 2v2 · {partyProfiles.length}/2</strong><small>{partyProfiles.map((member) => member.username).join(" + ")}</small></div><button onClick={() => goTo("social")}>GESTIONAR</button></div>}
             <div className="mode-choice-list">
-              <button className="mode-choice classic-mode" disabled={profile.coins < MATCH_ENTRY_FEE || Boolean(onlineQueueMode)} onClick={() => joinOnlineQueue("classic")}><span className="mode-choice-icon">⚔️</span><span><b>CLÁSICO 4P · ONLINE</b><small>10 rondas · busca 3 jugadores reales</small></span><i>›</i></button>
-              <button className="mode-choice teams-mode" disabled={profile.coins < MATCH_ENTRY_FEE || Boolean(onlineQueueMode)} onClick={() => joinOnlineQueue("teams")}><span className="mode-choice-icon">🤝</span><span><b>EQUIPOS 2v2 · ONLINE</b><small>8 rondas · juega en grupo o busca un equipo</small></span><i>›</i></button>
-              <button className="mode-choice duel-mode" disabled={profile.coins < MATCH_ENTRY_FEE || Boolean(onlineQueueMode)} onClick={() => joinOnlineQueue("duel")}><span className="mode-choice-icon">🔥</span><span><b>DUELO 1v1 · ONLINE</b><small>5 rondas rápidas · busca un rival real</small></span><i>›</i></button>
+              <button className="mode-choice classic-mode" disabled={!accountWallet || wallet.coins < MATCH_ENTRY_FEE || Boolean(onlineQueueMode)} onClick={() => joinOnlineQueue("classic")}><span className="mode-choice-icon">⚔️</span><span><b>CLÁSICO 4P · ONLINE</b><small>10 rondas · busca 3 jugadores reales</small></span><i>›</i></button>
+              <button className="mode-choice teams-mode" disabled={!accountWallet || wallet.coins < MATCH_ENTRY_FEE || Boolean(onlineQueueMode)} onClick={() => joinOnlineQueue("teams")}><span className="mode-choice-icon">🤝</span><span><b>EQUIPOS 2v2 · ONLINE</b><small>8 rondas · juega en grupo o busca un equipo</small></span><i>›</i></button>
+              <button className="mode-choice duel-mode" disabled={!accountWallet || wallet.coins < MATCH_ENTRY_FEE || Boolean(onlineQueueMode)} onClick={() => joinOnlineQueue("duel")}><span className="mode-choice-icon">🔥</span><span><b>DUELO 1v1 · ONLINE</b><small>5 rondas rápidas · busca un rival real</small></span><i>›</i></button>
             </div>
             {onlineQueueMode && <div className="online-search-card" role="status"><span className="online-search-orbit">◉</span><div><strong>{onlineQueueMessage || "Buscando jugadores…"}</strong><small>En la cola: {onlineQueueCount} · necesarios: {onlineQueueMode === "duel" ? 2 : 4}</small></div><button onClick={cancelOnlineQueue}>CANCELAR</button></div>}
             <button className="social-inline-link" onClick={() => goTo("social")}>AMIGOS Y GRUPOS 2v2 <b>›</b></button>
@@ -2881,11 +2920,11 @@ export default function App() {
           <section className="menu-subpanel modes-panel">
             <button className="menu-back-link" onClick={() => goTo("menu")}>‹ VOLVER AL MENÚ</button>
             <span className="menu-section-kicker">ELIGE CÓMO JUGAR</span><h1>MODOS DE JUEGO</h1>
-            <p className="entry-fee-note">Entrada a cada partida: <strong>{MATCH_ENTRY_FEE} monedas</strong> · Saldo: {profile.coins} 🪙</p>
+            <p className="entry-fee-note">Entrada a cada partida: <strong>{MATCH_ENTRY_FEE} monedas</strong> · Monedero de cuenta: {wallet.coins} 🪙</p>
             <div className="mode-choice-list">
-            <button className="mode-choice classic-mode" disabled={profile.coins < MATCH_ENTRY_FEE} onClick={() => startMatch("classic")}><span className="mode-choice-icon">⚔️</span><span><b>CLÁSICO 4P</b><small>10 rondas · 4 jugadores · premio de victoria: 50 monedas</small></span><i>›</i></button>
-              <button className="mode-choice teams-mode" disabled={profile.coins < MATCH_ENTRY_FEE} onClick={() => startMatch("teams")}><span className="mode-choice-icon">🤝</span><span><b>EQUIPOS 2v2</b><small>8 rondas · suma las pujas del equipo · premio de victoria: 40 monedas</small></span><i>›</i></button>
-              <button className="mode-choice duel-mode" disabled={profile.coins < MATCH_ENTRY_FEE} onClick={() => startMatch("duel")}><span className="mode-choice-icon">🔥</span><span><b>DUELO 1v1</b><small>5 rondas rápidas · premio de victoria: 25 monedas</small></span><i>›</i></button>
+            <button className="mode-choice classic-mode" disabled={!accountWallet || wallet.coins < MATCH_ENTRY_FEE} onClick={() => startMatch("classic")}><span className="mode-choice-icon">⚔️</span><span><b>CLÁSICO 4P</b><small>10 rondas · 4 jugadores · premio de victoria: 50 monedas</small></span><i>›</i></button>
+              <button className="mode-choice teams-mode" disabled={!accountWallet || wallet.coins < MATCH_ENTRY_FEE} onClick={() => startMatch("teams")}><span className="mode-choice-icon">🤝</span><span><b>EQUIPOS 2v2</b><small>8 rondas · suma las pujas del equipo · premio de victoria: 40 monedas</small></span><i>›</i></button>
+              <button className="mode-choice duel-mode" disabled={!accountWallet || wallet.coins < MATCH_ENTRY_FEE} onClick={() => startMatch("duel")}><span className="mode-choice-icon">🔥</span><span><b>DUELO 1v1</b><small>5 rondas rápidas · premio de victoria: 25 monedas</small></span><i>›</i></button>
             </div>
           </section>
         ) : (
@@ -2918,16 +2957,16 @@ export default function App() {
             {screen === "profile" && <>
               <span className="menu-section-kicker">TU HISTORIA EN LA MESA</span><h1>MI PERFIL</h1>
               <div className="profile-hero"><div className={`menu-avatar-frame large ${avatarFrameClass(profile.equippedFrame)}`} style={{ "--avatar-fill": profile.equippedAvatarColor } as React.CSSProperties}><AvatarFace avatar={profile.avatar} /></div><div><small>CAPITÁN</small><strong>{profile.name}</strong><span>Perfil y victorias</span></div></div>
-              {localPreview ? <section className="account-panel"><div className="account-panel-heading"><span><small>MODO PRUEBA LOCAL</small><strong>Sin cuenta vinculada</strong></span><button type="button" onClick={() => { setLocalPreview(false); setScreen("auth"); }}>VOLVER AL ACCESO</button></div><p className="account-status">Tus pruebas se guardan solo en este navegador. El modo online requiere una cuenta.</p></section> : <section className="account-panel" aria-labelledby="account-panel-title">
+              <section className="account-panel" aria-labelledby="account-panel-title">
                 <div className="account-panel-heading"><span><small>CUENTA ONLINE</small><strong id="account-panel-title">Cuenta vinculada</strong></span><button type="button" onClick={() => void signOutAccount()} disabled={authBusy}>{authBusy ? "CERRANDO…" : "CERRAR SESIÓN"}</button></div>
                 <p className="account-status">Conectado como <strong>{authSession?.user.email ?? "cuenta Google"}</strong>. El perfil público se sincroniza con esta cuenta.</p>
                 {authMessage && <p className="account-feedback" role="status">{authMessage}</p>}
-              </section>}
-              {!localPreview && authSession && <section className="account-wallet-card" aria-label="Monedero seguro de la cuenta">
+              </section>
+              {authSession && <section className="account-wallet-card" aria-label="Monedero seguro de la cuenta">
                 <div className="account-wallet-heading"><span><small>SALDO EN SUPABASE</small><strong>MONEDERO SEGURO DE CUENTA</strong></span><button type="button" onClick={() => void accountWalletRefreshRef.current()} disabled={accountWalletLoading}>{accountWalletLoading ? "ACTUALIZANDO…" : "ACTUALIZAR"}</button></div>
                 <div className="account-wallet-balances"><span><img src={publicAsset("sigma/ui/coin.png")} alt="" />{accountWallet?.coins.toLocaleString("es-ES") ?? (accountWalletLoading ? "…" : "—")} <small>MONEDAS</small></span><span><img src={publicAsset("sigma/ui/diamond.png")} alt="" />{accountWallet?.gems.toLocaleString("es-ES") ?? (accountWalletLoading ? "…" : "—")} <small>GEMAS</small></span></div>
                 {accountWalletMessage && <p className="account-wallet-message" role="status">{accountWalletMessage}</p>}
-                <p className="account-wallet-note">El saldo offline del juego sigue guardándose en este navegador ({profile.coins.toLocaleString("es-ES")} 🪙 · {profile.gems.toLocaleString("es-ES")} 💎). Los pagos confirmados se acreditan aquí desde el servidor.</p>
+                <p className="account-wallet-note">Este saldo se comparte entre partidas contra IA y partidas online. Las monedas y gemas se guardan en la cuenta, no en este navegador.</p>
               </section>}
               <div className="profile-season-ranks"><span className="menu-section-kicker">TUS RANGOS · TEMPORADA ACTUAL</span>{(["classic", "teams", "duel"] as GameMode[]).map((mode) => { const wins = profile.winsByPeriod.monthly[mode].player ?? 0; const rank = rankForWins(wins); return <div className="profile-season-rank" key={mode}><img src={rankBadgeUrl(rank.asset)} alt="" /><span><small>{modeTitles[mode]}</small><strong>{rank.name}</strong><em>{wins} victorias este mes</em><em>{rank.next === Infinity ? "Rango máximo" : `Faltan ${Math.max(0, rank.next - wins)} para ${rank.nextName}`}</em><em>+{rank.coins} 🪙 · +{rank.gems} 💎 al cierre</em></span></div>; })}</div>
               <div className="profile-name-edit"><label htmlFor="captain-name">NOMBRE DE USUARIO</label><div><input id="captain-name" maxLength={16} value={profileNameDraft} onChange={(event) => setProfileNameDraft(event.target.value.replace(/[^A-Za-z0-9]/g, ""))} /><button disabled={!canChangeName || socialBusy} onClick={async () => {
@@ -2971,7 +3010,7 @@ export default function App() {
               </div></div>
               <p className="roulette-status">{rouletteResult || (rouletteReady ? "¡GIRO GRATIS DISPONIBLE!" : `Próximo giro gratis en ${rouletteTimeLabel}`)}</p>
               <p className="roulette-paid-note">Giros extra hoy: {paidSpinsToday} · Próximo coste: {paidSpinCost} 💎 · +5 por giro (máx. 25)</p>
-              <button className="play-now-button roulette-spin-button" disabled={rouletteSpinning || (!rouletteReady && profile.gems < paidSpinCost)} onClick={() => spinRoulette(!rouletteReady)}>{rouletteSpinning ? "GIRANDO…" : rouletteReady ? "TIRAR GRATIS" : `TIRAR · ${paidSpinCost} 💎`}</button>
+              <button className="play-now-button roulette-spin-button" disabled={rouletteSpinning || (!rouletteReady && wallet.gems < paidSpinCost)} onClick={() => spinRoulette(!rouletteReady)}>{rouletteSpinning ? "GIRANDO…" : rouletteReady ? "TIRAR GRATIS" : `TIRAR · ${paidSpinCost} 💎`}</button>
             </>}
           </section>
         )}
@@ -2991,8 +3030,8 @@ export default function App() {
           onEquip={equipDeck}
           onPurchase={purchaseDeck}
           ownedCards={profile.ownedCards}
-          coins={profile.coins}
-          gems={profile.gems}
+          coins={wallet.coins}
+          gems={wallet.gems}
           accountWallet={accountWallet}
           ownedAvatars={profile.ownedAvatars}
           ownedFrames={profile.ownedFrames}
@@ -3211,7 +3250,7 @@ export default function App() {
 
       <div className="game-action-stack">
         {selected !== null && !bidPlaced && !removeMode && handValues[selected] && <div className="selected-passive-preview" role="status"><span>EFECTO DE LA CARTA {handValues[selected].value}</span><strong>{cardEffects[`${handValues[selected].deckId}-${handValues[selected].value}`]?.name ?? "Sin pasiva"}</strong><small>{cardEffects[`${handValues[selected].deckId}-${handValues[selected].value}`]?.description ?? "Esta carta no tiene efecto individual."}</small></div>}
-        <button className={`remove-cards-button ${removeMode ? "active" : ""}`} onClick={() => { setRemoveMode((active) => !active); setSelected(null); playSfx("click"); }} disabled={bidPlaced || (!removeMode && profile.gems < removeGemCost)}>
+        <button className={`remove-cards-button ${removeMode ? "active" : ""}`} onClick={() => { setRemoveMode((active) => !active); setSelected(null); playSfx("click"); }} disabled={bidPlaced || (!removeMode && wallet.gems < removeGemCost)}>
           <strong>{removeMode ? "CANCELAR RETIRADA" : "REMOVER CARTAS"}</strong>
           <small>{removeMode ? "ELIGE UNA CARTA DE TU MANO" : `COSTE · ${removeGemCost} 💎`}</small>
         </button>
