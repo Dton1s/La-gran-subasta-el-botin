@@ -1303,6 +1303,8 @@ export default function App() {
   const [rankingPeriod, setRankingPeriod] = useState<RankingPeriod>("total");
   const [globalRankingRows, setGlobalRankingRows] = useState<{ id: string; name: string; wins: number; color: string; avatar: string }[]>([]);
   const [globalRankingLoading, setGlobalRankingLoading] = useState(false);
+  const [globalRankingError, setGlobalRankingError] = useState("");
+  const [rankingRetry, setRankingRetry] = useState(0);
   const [missionTab, setMissionTab] = useState<PlayerMission["period"]>("diaria");
   const [bonusCoinsWon, setBonusCoinsWon] = useState(0);
   const [rouletteSpinning, setRouletteSpinning] = useState(false);
@@ -1322,41 +1324,61 @@ export default function App() {
     if (!supabase || !authSession || (screen !== "ranking" && screen !== "season-ranking")) return;
     let active = true;
     setGlobalRankingLoading(true);
-    const now = new Date(serviceNow);
+    setGlobalRankingError("");
+    const now = new Date();
     let periodStart = "1970-01-01";
-    if (rankingPeriod === "weekly" || screen === "season-ranking") {
+    if (screen === "season-ranking") {
+      now.setUTCDate(1);
+      periodStart = now.toISOString().slice(0, 10);
+    } else if (rankingPeriod === "weekly") {
       const mondayOffset = (now.getUTCDay() + 6) % 7;
       now.setUTCDate(now.getUTCDate() - mondayOffset);
-      if (screen === "season-ranking") now.setUTCDate(1);
-      else periodStart = now.toISOString().slice(0, 10);
-    }
-    if (rankingPeriod === "monthly" && screen !== "season-ranking") {
+      periodStart = now.toISOString().slice(0, 10);
+    } else if (rankingPeriod === "monthly") {
       now.setUTCDate(1);
       periodStart = now.toISOString().slice(0, 10);
     }
-    void supabase.from("ranking_totals")
-      .select("user_id,wins,profiles(username,display_name,avatar_id,avatar_color)")
-      .eq("mode", rankingMode)
-      .eq("period", screen === "season-ranking" ? "monthly" : rankingPeriod)
-      .eq("period_start", screen === "season-ranking" ? now.toISOString().slice(0, 10) : periodStart)
-      .gt("wins", 0)
-      .order("wins", { ascending: false })
-      .limit(50)
-      .then(({ data, error }) => {
+    const period = screen === "season-ranking" ? "monthly" : rankingPeriod;
+    void (async () => {
+      try {
+        // ranking_totals references auth.users, not profiles. Fetch the public
+        // profiles separately instead of asking PostgREST for a nonexistent FK.
+        const { data, error } = await supabase.from("ranking_totals")
+          .select("user_id,wins")
+          .eq("mode", rankingMode)
+          .eq("period", period)
+          .eq("period_start", periodStart)
+          .gt("wins", 0)
+          .order("wins", { ascending: false })
+          .limit(50);
         if (!active) return;
-        if (error) {
+        if (error) throw error;
+        const ranking = data ?? [];
+        if (!ranking.length) {
           setGlobalRankingRows([]);
-          setAccountWalletMessage("No se pudo cargar el ranking global de Supabase.");
-        } else {
-          setGlobalRankingRows((data ?? []).map((row: any) => {
-            const publicProfile = Array.isArray(row.profiles) ? row.profiles[0] : row.profiles;
-            return { id: row.user_id, name: publicProfile?.username || publicProfile?.display_name || "Capitán", wins: Number(row.wins) || 0, color: publicProfile?.avatar_color || "#7454c7", avatar: publicProfile?.avatar_id || "🐱" };
-          }));
+          return;
         }
-        setGlobalRankingLoading(false);
-      });
+        const userIds = ranking.map((row: any) => row.user_id);
+        const { data: profiles, error: profileError } = await supabase.from("profiles")
+          .select("id,username,display_name,avatar_id,avatar_color")
+          .in("id", userIds);
+        if (!active) return;
+        if (profileError) throw profileError;
+        const profileById = new Map((profiles ?? []).map((profile: any) => [profile.id, profile]));
+        setGlobalRankingRows(ranking.map((row: any) => {
+          const publicProfile = profileById.get(row.user_id) as any;
+          return { id: row.user_id, name: publicProfile?.username || publicProfile?.display_name || "Capitán", wins: Number(row.wins) || 0, color: publicProfile?.avatar_color || "#7454c7", avatar: publicProfile?.avatar_id || "🐱" };
+        }));
+      } catch (error) {
+        if (!active) return;
+        setGlobalRankingRows([]);
+        setGlobalRankingError(error instanceof Error ? error.message : "No se pudo cargar el ranking.");
+      } finally {
+        if (active) setGlobalRankingLoading(false);
+      }
+    })();
     return () => { active = false; };
-  }, [authSession?.user.id, screen, rankingMode, rankingPeriod, serviceNow]);
+  }, [authSession?.user.id, screen, rankingMode, rankingPeriod, rankingRetry]);
   const [chatOpen, setChatOpen] = useState(false);
   const [chatEmotesOpen, setChatEmotesOpen] = useState(false);
   const [chatDraft, setChatDraft] = useState("");
@@ -2222,7 +2244,23 @@ export default function App() {
 
   const startMatch = async (mode: GameMode) => {
     if (!authSession || !accountWallet) { setScreen("auth"); return; }
-    if (!supabase || accountWallet.coins < MATCH_ENTRY_FEE) return;
+    if (!supabase) { setAccountWalletMessage("No hay conexión con el servidor de partidas."); return; }
+    // If the wallet/session was created but the game-authority request failed,
+    // retry that same match instead of charging another entry fee.
+    if (activeMatchId && onlineMatch?.isOnline === false) {
+      setAccountWalletMessage("");
+      try {
+        const view = await invokeGameAuthority("start_match", { matchId: activeMatchId });
+        applyOnlineAuthorityView(view);
+        setScreen("game");
+      } catch (error) {
+        setAccountWalletMessage(error instanceof Error ? `No se pudo conectar con el motor de partida: ${error.message}` : "No se pudo conectar con el motor de partida.");
+        setScreen("modes");
+      }
+      return;
+    }
+    if (accountWallet.coins < MATCH_ENTRY_FEE) { setAccountWalletMessage("No tienes monedas suficientes para pagar la entrada."); return; }
+    setAccountWalletMessage("");
     const matchId = crypto.randomUUID();
     const { data: started, error: startError } = await supabase.rpc("start_offline_match", { p_match_id: matchId, p_mode: mode });
     if (startError) {
@@ -2242,7 +2280,6 @@ export default function App() {
     setOnlineSubmittedBids({});
     setOnlineRoomReady(false);
     const activeProfile = profileRef.current;
-    if (activeProfile.coins < MATCH_ENTRY_FEE) return;
     matchEventsRef.current = getActiveEvents(new Date());
     const nextChatSession = crypto.randomUUID();
     chatRoomId.current = requestedChatRoomId.current || nextChatSession;
@@ -2294,7 +2331,8 @@ export default function App() {
       const view = await invokeGameAuthority("start_match", { matchId });
       applyOnlineAuthorityView(view);
     } catch (error) {
-      setAccountWalletMessage(error instanceof Error ? `No se pudo iniciar la partida segura: ${error.message}` : "No se pudo iniciar la partida segura.");
+      setAccountWalletMessage(error instanceof Error ? `No se pudo iniciar la partida segura: ${error.message}. Pulsa el modo otra vez para reintentar sin volver a pagar.` : "No se pudo iniciar la partida segura. Pulsa el modo otra vez para reintentar sin volver a pagar.");
+      setScreen("modes");
     }
     playSfx("deal");
   };
@@ -3034,6 +3072,7 @@ export default function App() {
     const rankingResetAt = rankingPeriod === "weekly" ? profile.winsPeriodResetAt.weekly : profile.winsPeriodResetAt.monthly;
     const rankingPeriodStatus = rankingPeriod === "total" ? "Este ranking no se reinicia nunca." : `Se reinicia en ${formatPeriodRemaining(rankingResetAt - serviceNow)}.`;
     const rankingRows = globalRankingRows;
+    const offlineRetryPending = Boolean(activeMatchId && onlineMatch?.isOnline === false);
     const nameCooldownMs = 30 * 24 * 60 * 60 * 1000;
     const nameCooldownLeft = Math.max(0, nameCooldownMs - (Date.now() - profile.lastNameChange));
     const renameGems = authSession ? (accountWallet?.gems ?? 0) : profile.gems;
@@ -3135,12 +3174,13 @@ export default function App() {
           <section className="menu-subpanel modes-panel">
             <button className="menu-back-link" onClick={() => goTo("menu")}>‹ VOLVER AL MENÚ</button>
             <span className="menu-section-kicker">ELIGE CÓMO JUGAR</span><h1>MODOS DE JUEGO</h1>
-            <p className="entry-fee-note">Entrada a cada partida: <strong>{MATCH_ENTRY_FEE} monedas</strong> · Monedero de cuenta: {wallet.coins} 🪙</p>
+            <p className="entry-fee-note">Entrada a cada partida: <strong>{MATCH_ENTRY_FEE} monedas</strong> · Monedero de cuenta: {accountWallet?.coins.toLocaleString("es-ES") ?? "cargando…"} 🪙</p>
             <div className="mode-choice-list">
-            <button className="mode-choice classic-mode" disabled={!accountWallet || wallet.coins < MATCH_ENTRY_FEE} onClick={() => startMatch("classic")}><span className="mode-choice-icon">⚔️</span><span><b>CLÁSICO 4P</b><small>10 rondas · 4 jugadores · premio de victoria: 50 monedas</small></span><i>›</i></button>
-              <button className="mode-choice teams-mode" disabled={!accountWallet || wallet.coins < MATCH_ENTRY_FEE} onClick={() => startMatch("teams")}><span className="mode-choice-icon">🤝</span><span><b>EQUIPOS 2v2</b><small>8 rondas · suma las pujas del equipo · premio de victoria: 40 monedas</small></span><i>›</i></button>
-              <button className="mode-choice duel-mode" disabled={!accountWallet || wallet.coins < MATCH_ENTRY_FEE} onClick={() => startMatch("duel")}><span className="mode-choice-icon">🔥</span><span><b>DUELO 1v1</b><small>5 rondas rápidas · premio de victoria: 25 monedas</small></span><i>›</i></button>
+              <button className="mode-choice classic-mode" disabled={!accountWallet || (!offlineRetryPending && accountWallet.coins < MATCH_ENTRY_FEE)} onClick={() => startMatch("classic")}><span className="mode-choice-icon">⚔️</span><span><b>CLÁSICO 4P</b><small>{offlineRetryPending ? "Reintentar inicio pendiente" : "10 rondas · 4 jugadores · premio de victoria: 50 monedas"}</small></span><i>›</i></button>
+              <button className="mode-choice teams-mode" disabled={!accountWallet || (!offlineRetryPending && accountWallet.coins < MATCH_ENTRY_FEE)} onClick={() => startMatch("teams")}><span className="mode-choice-icon">🤝</span><span><b>EQUIPOS 2v2</b><small>{offlineRetryPending ? "Reintentar inicio pendiente" : "8 rondas · suma las pujas del equipo · premio de victoria: 40 monedas"}</small></span><i>›</i></button>
+              <button className="mode-choice duel-mode" disabled={!accountWallet || (!offlineRetryPending && accountWallet.coins < MATCH_ENTRY_FEE)} onClick={() => startMatch("duel")}><span className="mode-choice-icon">🔥</span><span><b>DUELO 1v1</b><small>{offlineRetryPending ? "Reintentar inicio pendiente" : "5 rondas rápidas · premio de victoria: 25 monedas"}</small></span><i>›</i></button>
             </div>
+            {accountWalletMessage && <p className="account-feedback" role="alert">{accountWalletMessage}</p>}
           </section>
         ) : (
           <section className={`menu-subpanel ${screen === "roulette" ? "roulette-panel" : ""}`}>
@@ -3156,7 +3196,7 @@ export default function App() {
               <span className="menu-section-kicker">VICTORIAS POR PERIODO</span><h1>RANKING VICTORIAS</h1>
               <div className="ranking-period-tabs">{(["weekly", "monthly", "total"] as RankingPeriod[]).map((period) => <button key={period} className={rankingPeriod === period ? "active" : ""} onClick={() => { setRankingPeriod(period); playSfx("click"); }}>{period === "weekly" ? "SEMANAL" : period === "monthly" ? "MENSUAL" : "TOTAL"}</button>)}</div>
               <div className="ranking-tabs">{(["classic", "teams", "duel"] as GameMode[]).map((mode) => <button className={rankingMode === mode ? "active" : ""} key={mode} onClick={() => { playSfx("click"); setRankingMode(mode); }}>{modeTitles[mode]}</button>)}</div>
-              <div className="ranking-list">{rankingRows.length ? rankingRows.map((player, index) => <div className={`ranking-row rank-${index + 1}`} key={player.id}><b className="ranking-place">{String(index + 1).padStart(2, "0")}</b><span className="ranking-avatar" style={{ background: player.color }}><AvatarFace avatar={player.avatar} /></span><strong>{player.name}</strong><em>{player.wins} {player.wins === 1 ? "victoria" : "victorias"}</em></div>) : <p className="ranking-empty">{globalRankingLoading ? "Cargando ranking…" : "Aún no hay victorias online en este modo. ¡Juega para entrar en el Top 50!"}</p>}</div>
+              <div className="ranking-list">{rankingRows.length ? rankingRows.map((player, index) => <div className={`ranking-row rank-${index + 1}`} key={player.id}><b className="ranking-place">{String(index + 1).padStart(2, "0")}</b><span className="ranking-avatar" style={{ background: player.color }}><AvatarFace avatar={player.avatar} /></span><strong>{player.name}</strong><em>{player.wins} {player.wins === 1 ? "victoria" : "victorias"}</em></div>) : <div className="ranking-empty">{globalRankingLoading ? "Cargando ranking…" : globalRankingError ? <>{globalRankingError}<button type="button" className="social-refresh-button" onClick={() => setRankingRetry((retry) => retry + 1)}>REINTENTAR</button></> : "Aún no hay victorias en este periodo y modo. ¡Juega para entrar en el Top 50!"}</div>}</div>
               <p className="menu-footnote">{rankingPeriod === "weekly" ? "Semanal" : rankingPeriod === "monthly" ? "Mensual" : "Histórico total"} · {modeTitles[rankingMode]} · Top 50 · solo jugadores con victorias · {rankingPeriodStatus}</p>
             </>}
             {screen === "season-ranking" && <>
@@ -3165,7 +3205,7 @@ export default function App() {
               <div className="ranking-tabs">{(["classic", "teams", "duel"] as GameMode[]).map((mode) => <button className={rankingMode === mode ? "active" : ""} key={mode} onClick={() => { playSfx("click"); setRankingMode(mode); }}>{modeTitles[mode]}</button>)}</div>
               {(() => {
                 const monthlyRows = globalRankingRows;
-                return <div className="season-rank-list">{monthlyRows.length ? monthlyRows.map((row, index) => { const rank = rankForWins(row.wins); return <div className="season-rank-row" key={row.id}><b className="ranking-place">{String(index + 1).padStart(2, "0")}</b><span className="ranking-avatar" style={{ background: row.color }}><AvatarFace avatar={row.avatar} /></span><img className="season-rank-badge" src={rankBadgeUrl(rank.asset)} alt="" /><strong>{row.name}<small>{rank.name} · fin de mes: +{rank.coins} 🪙 / +{rank.gems} 💎</small></strong><em>{row.wins} {row.wins === 1 ? "victoria" : "victorias"}</em></div>; }) : <p className="ranking-empty">{globalRankingLoading ? "Cargando ranking…" : `Aún no hay victorias esta temporada en ${modeTitles[rankingMode]}.`}</p>}</div>;
+                return <div className="season-rank-list">{monthlyRows.length ? monthlyRows.map((row, index) => { const rank = rankForWins(row.wins); return <div className="season-rank-row" key={row.id}><b className="ranking-place">{String(index + 1).padStart(2, "0")}</b><span className="ranking-avatar" style={{ background: row.color }}><AvatarFace avatar={row.avatar} /></span><img className="season-rank-badge" src={rankBadgeUrl(rank.asset)} alt="" /><strong>{row.name}<small>{rank.name} · fin de mes: +{rank.coins} 🪙 / +{rank.gems} 💎</small></strong><em>{row.wins} {row.wins === 1 ? "victoria" : "victorias"}</em></div>; }) : <div className="ranking-empty">{globalRankingLoading ? "Cargando ranking…" : globalRankingError ? <>{globalRankingError}<button type="button" className="social-refresh-button" onClick={() => setRankingRetry((retry) => retry + 1)}>REINTENTAR</button></> : `Aún no hay victorias esta temporada en ${modeTitles[rankingMode]}.`}</div>}</div>;
               })()}
               <p className="menu-footnote">Rangos mensuales separados por modalidad · Las recompensas se calculan al cerrar el mes.</p>
             </>}
